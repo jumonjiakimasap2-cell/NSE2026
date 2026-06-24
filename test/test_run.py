@@ -1,129 +1,63 @@
-import RPi.GPIO as GPIO
+from gpiozero import Motor, PWMOutputDevice
+from gpiozero.pins.lgpio import LGPIOFactory
+from gpiozero import Device
 import time
 import sys
-
-# ===== ピン設定 =====
-PWMA = 33
-AIN1 = 29
-AIN2 = 31
-PWMB = 18
-BIN1 = 12
-BIN2 = 16
-
-frequency = 100  # PWM周波数（少し上げた方が安定）
-
-GPIO.setmode(GPIO.BCM)
-
-GPIO.setup(PWMA, GPIO.OUT)
-GPIO.setup(AIN1, GPIO.OUT)
-GPIO.setup(AIN2, GPIO.OUT)
-GPIO.setup(PWMB, GPIO.OUT)
-GPIO.setup(BIN1, GPIO.OUT)
-GPIO.setup(BIN2, GPIO.OUT)
-
-# PWM
-pwmA = GPIO.PWM(PWMA, frequency)
-pwmB = GPIO.PWM(PWMB, frequency)
-
-pwmA.start(0)
-pwmB.start(0)
-
-speed = 80  # デフォルト速度（0〜100）
-
-# ===== モーター制御 =====
+# Use lgpio backend (works on Pi Zero 2 W with modern OS)
+Device.pin_factory = LGPIOFactory()
+# ===== Pin configuration (BCM numbering) =====
+# Converted from BOARD to BCM:
+#   BOARD 33 -> BCM 13 (PWMA)
+#   BOARD 29 -> BCM 5  (AIN1)
+#   BOARD 31 -> BCM 6  (AIN2)
+#   BOARD 18 -> BCM 24 (PWMB)
+#   BOARD 12 -> BCM 18 (BIN1)
+#   BOARD 16 -> BCM 23 (BIN2)
+pwm_a = PWMOutputDevice(13)  # PWMA
+pwm_b = PWMOutputDevice(24)  # PWMB
+motor_a = Motor(forward=5, backward=6)   # AIN1, AIN2
+motor_b = Motor(forward=18, backward=23)  # BIN1, BIN2
+speed = 0.8  # 0.0〜1.0（80%相当）
 def stop():
-    pwmA.ChangeDutyCycle(0)
-    pwmB.ChangeDutyCycle(0)
-    GPIO.output(AIN1, 0)
-    GPIO.output(AIN2, 0)
-    GPIO.output(BIN1, 0)
-    GPIO.output(BIN2, 0)
-
+    pwm_a.value = 0
+    pwm_b.value = 0
+    motor_a.stop()
+    motor_b.stop()
 def forward():
-    pwmA.ChangeDutyCycle(speed)
-    pwmB.ChangeDutyCycle(speed)
-    GPIO.output(AIN1, 1)
-    GPIO.output(AIN2, 0)
-    GPIO.output(BIN1, 1)
-    GPIO.output(BIN2, 0)
-
+    pwm_a.value = speed
+    pwm_b.value = speed
+    motor_a.forward()
+    motor_b.forward()
 def backward():
-    pwmA.ChangeDutyCycle(speed)
-    pwmB.ChangeDutyCycle(speed)
-    GPIO.output(AIN1, 0)
-    GPIO.output(AIN2, 1)
-    GPIO.output(BIN1, 0)
-    GPIO.output(BIN2, 1)
-
+    pwm_a.value = speed
+    pwm_b.value = speed
+    motor_a.backward()
+    motor_b.backward()
 def left():
-    pwmA.ChangeDutyCycle(speed * 0.5)
-    pwmB.ChangeDutyCycle(speed)
-    GPIO.output(AIN1, 1)
-    GPIO.output(AIN2, 0)
-    GPIO.output(BIN1, 1)
-    GPIO.output(BIN2, 0)
-
+    pwm_a.value = speed * 0.5
+    pwm_b.value = speed
+    motor_a.forward()
+    motor_b.forward()
 def right():
-    pwmA.ChangeDutyCycle(speed)
-    pwmB.ChangeDutyCycle(speed * 0.5)
-    GPIO.output(AIN1, 1)
-    GPIO.output(AIN2, 0)
-    GPIO.output(BIN1, 1)
-    GPIO.output(BIN2, 0)
-
-# ===== キー入力（1文字取得）=====
-def get_key():
-    try:
-        import termios, tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        return ch.lower()
-    except:
-        return input().strip().lower()
-
-# ===== メイン =====
+    pwm_a.value = speed
+    pwm_b.value = speed * 0.5
+    motor_a.forward()
+    motor_b.forward()
+# W/A/S/Dキー操作ループ
 try:
-    print("操作開始：W/A/S/Dで移動、spaceで停止、qで終了")
-
+    print("操作開始：W/A/S/D で移動、Space で停止、Q で終了")
     while True:
         cmd = get_key()
-
-        if cmd == 'w':
-            print("Forward")
-            forward()
-
-        elif cmd == 's':
-            print("Backward")
-            backward()
-
-        elif cmd == 'a':
-            print("Left")
-            left()
-
-        elif cmd == 'd':
-            print("Right")
-            right()
-
-        elif cmd == ' ':
-            print("Stop")
-            stop()
-
-        elif cmd == 'q':
-            print("終了")
-            break
-
+        if cmd == 'w':   forward()
+        elif cmd == 's': backward()
+        elif cmd == 'a': left()
+        elif cmd == 'd': right()
+        elif cmd == ' ': stop()
+        elif cmd == 'q': break
         time.sleep(0.1)
-
 except KeyboardInterrupt:
-    print("強制終了")
-
+    print("\n強制終了")
 finally:
     stop()
-    pwmA.stop()
-    pwmB.stop()
-    GPIO.cleanup()
+    pwm_a.close(); pwm_b.close()
+    motor_a.close(); motor_b.close()

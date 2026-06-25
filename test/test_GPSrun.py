@@ -51,7 +51,7 @@ import datetime
 from pathlib import Path
 
 # --- gpiozero (test_run.py / fall.py / test_straight.py と同じバックエンド) ---
-from gpiozero import Motor, PWMOutputDevice, Device
+from gpiozero import Motor, PWMOutputDevice, Device, OutputDevice  # OutputDevice を追加
 from gpiozero.pins.lgpio import LGPIOFactory
 
 # --- シリアル (GPS 用 / test_finishv.py と同じ) ---
@@ -239,6 +239,7 @@ PIN_AIN2 =  6
 PIN_PWMB = 18
 PIN_BIN1 = 23
 PIN_BIN2 = 24
+PIN_STBY = 11  # STBYピンを追加
 
 
 class MotorController:
@@ -262,12 +263,14 @@ class MotorController:
         self._pwm_b  = PWMOutputDevice(PIN_PWMB)
         self._motor_a = Motor(forward=PIN_AIN1, backward=PIN_AIN2)   # 右
         self._motor_b = Motor(forward=PIN_BIN1, backward=PIN_BIN2)   # 左
+        self._stby = OutputDevice(PIN_STBY)  # STBYピンの初期化を追加
         self.stop()
 
     # ── 基本コマンド ──────────────────────────────────────
 
     def forward(self):
         """両モータ前進 (test_run.py: forward())"""
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = self.speed_fwd
         self._pwm_b.value = self.speed_fwd
         self._motor_a.forward()
@@ -279,12 +282,14 @@ class MotorController:
         self._pwm_b.value = 0
         self._motor_a.stop()
         self._motor_b.stop()
+        self._stby.off()  # モーターの動きを停止した後にSTBYをLOWにする
 
     def turn_left_strong(self):
         """
         左旋回 (強) ── 右モータ前進 / 左モータ停止。
         NICS2026/NOA.py motor_thread() direction==500 に相当。
         """
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = self.speed_turn
         self._pwm_b.value = 0
         self._motor_a.forward()
@@ -295,6 +300,7 @@ class MotorController:
         右旋回 (強) ── 右モータ停止 / 左モータ前進。
         NICS2026/NOA.py motor_thread() direction==600 に相当。
         """
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = 0
         self._pwm_b.value = self.speed_turn
         self._motor_a.stop()
@@ -305,6 +311,7 @@ class MotorController:
         左寄り前進 (弱) ── 右モータ全速 / 左モータ弱速。
         NICS2026/main.py moveMotor_thread() direction>0 に相当。
         """
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = self.speed_fwd
         self._pwm_b.value = self.speed_weak
         self._motor_a.forward()
@@ -315,6 +322,7 @@ class MotorController:
         右寄り前進 (弱) ── 右モータ弱速 / 左モータ全速。
         NICS2026/main.py moveMotor_thread() direction<0 に相当。
         """
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = self.speed_weak
         self._pwm_b.value = self.speed_fwd
         self._motor_a.forward()
@@ -358,6 +366,7 @@ class MotorController:
         self._pwm_b.close()
         self._motor_a.close()
         self._motor_b.close()
+        self._stby.close()  # STBYピンのリソース解放を追加
 
     def __enter__(self):
         return self

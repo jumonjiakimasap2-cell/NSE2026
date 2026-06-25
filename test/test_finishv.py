@@ -1,3 +1,28 @@
+"""
+test_finishv.py
+===============
+落下中の終端速度測定プログラム
+ 
+BNO055（加速度・ジャイロ）, BMP180（気圧・高度）, micropyGPS（GPS）
+の各センサーから取得したデータをリアルタイムでログ表示する。
+また BNO055 の加速度データを時間積分して速度を推定し、並べて表示する。
+ 
+使い方:
+    python3 test_finishv.py
+    Ctrl+C で終了。終了時に CSV ログを保存し、推定終端速度を表示する。
+ 
+ログ列:
+    Time[s] | AccX | AccY | AccZ | Speed[m/s] | GyroX | GyroY | GyroZ
+           | Temp[C] | Pres[Pa] | Alt[m]
+           | Lat | Lng | GPS_Speed[kts] | GPS_Sats
+ 
+速度計算の考え方:
+    BNO055 を NDOF モードで動かすと getAcc() は重力を含んだ「絶対加速度」を
+    返す。合成ノルムを計算し、静止時の 1G (9.81 m/s²) を差し引くことで
+    落下方向の加速度（正: 加速, 負: 減速）を近似し、時間積分する。
+    → 完全な自由落下: acc_norm ≈ 0  → fall_acc ≈ -GRAVITY
+       終端速度付近  : acc_norm ≈ GRAVITY → fall_acc ≈ 0 (速度一定)
+"""
 import sys
 import os
 import time

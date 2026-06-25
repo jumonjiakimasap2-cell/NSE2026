@@ -10,13 +10,13 @@ Device.pin_factory = LGPIOFactory()
 #   BOARD 33 -> BCM 13 (PWMA)
 #   BOARD 29 -> BCM 5  (AIN1)
 #   BOARD 31 -> BCM 6  (AIN2)
-#   BOARD 18 -> BCM 24 (PWMB)
-#   BOARD 12 -> BCM 18 (BIN1)
-#   BOARD 16 -> BCM 23 (BIN2)
+#   BOARD 18 -> BCM 18 (PWMB)
+#   BOARD 12 -> BCM 23 (BIN1)
+#   BOARD 16 -> BCM 24 (BIN2)
 pwm_a = PWMOutputDevice(13)  # PWMA
-pwm_b = PWMOutputDevice(24)  # PWMB
+pwm_b = PWMOutputDevice(18)  # PWMB
 motor_a = Motor(forward=5, backward=6)   # AIN1, AIN2
-motor_b = Motor(forward=18, backward=23)  # BIN1, BIN2
+motor_b = Motor(forward=23, backward=24)  # BIN1, BIN2
 speed = 0.8  # 0.0〜1.0（80%相当）
 def stop():
     pwm_a.value = 0

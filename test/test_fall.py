@@ -20,9 +20,9 @@ NSE2026/test/fall.py
                FWD_SEC 秒間だけ前進して停止する。
  
 センサ/モータ:
-    - IMU  : BNO055  (I2C, smbus)          ← test_finishv.py と同じ
-    - 気圧 : BMP180  (I2C, smbus)          ← test_finishv.py と同じ
-    - モータ: gpiozero + lgpio             ← test_run.py と同じ
+    - IMU  : BNO055  (I2C, smbus)          Locally importable
+    - 気圧 : BMP180  (I2C, smbus)          Locally importable
+    - モータ: gpiozero + lgpio              ← test_run.py と同じ
               PWMA=BCM13, AIN1=BCM5, AIN2=BCM6
               PWMB=BCM24, BIN1=BCM18, BIN2=BCM23
  
@@ -32,9 +32,9 @@ NSE2026/test/fall.py
     FALL_COUNT_THRESHOLD 連続して落下判定する必要な回数
     FALL_TIMEOUT_SEC    落下検知のタイムアウト時間 [s]
     ESCAPE_SEC          サブキャリア脱出モータ前進時間 [s]
-    FWD_SEC             脱出後の前進時間 [s]
-    MOTOR_SPEED         モータ出力 0.0〜1.0
-    LOOP_DT             Phase0 ループ周期 [s]
+    FWD_SEC              脱出後の前進時間 [s]
+    MOTOR_SPEED          モータ出力 0.0〜1.0
+    LOOP_DT              Phase0 ループ周期 [s]
 """
 
 import sys
@@ -44,7 +44,7 @@ import datetime
 from pathlib import Path
  
 # --- gpiozero (test_run.py と同じバックエンド) ---
-from gpiozero import Motor, PWMOutputDevice
+from gpiozero import Motor, PWMOutputDevice, OutputDevice  # OutputDevice を追加
 from gpiozero.pins.lgpio import LGPIOFactory
 from gpiozero import Device
  
@@ -63,7 +63,7 @@ from BMP180 import BMP180
  
 # --- 落下検知 ---
 FALL_THRESHOLD       = 3.0    # [m/s²]  合成加速度ノルムがこれ以下 → 落下とみなす
-                               #          自由落下 ≈ 0、空気抵抗あり ≈ 2〜4 程度
+                               #         自由落下 ≈ 0、空気抵抗あり ≈ 2〜4 程度
 FALL_COUNT_THRESHOLD = 8      # 連続カウント数
 FALL_TIMEOUT_SEC     = 7 * 60 # [s]  7分でタイムアウト
  
@@ -84,6 +84,7 @@ PIN_AIN2 =  6
 PIN_PWMB = 18
 PIN_BIN1 = 23
 PIN_BIN2 = 24
+PIN_STBY = 11  # STBYピンを追加
  
 # ===========================================================================
 # モータ制御ヘルパー
@@ -102,12 +103,14 @@ class MotorController:
         self._pwm_b = PWMOutputDevice(PIN_PWMB)
         self._motor_a = Motor(forward=PIN_AIN1, backward=PIN_AIN2)
         self._motor_b = Motor(forward=PIN_BIN1, backward=PIN_BIN2)
+        self._stby = OutputDevice(PIN_STBY)  # STBYピンの初期化を追加
         self.stop()
  
     # ---- 基本コマンド (test_run.py の関数と 1対1 対応) ----
  
     def forward(self):
         """両モータ前進 (test_run.py: forward())"""
+        self._stby.on()  # モーターを動かす直前にSTBYをHIGHにする
         self._pwm_a.value = self.speed
         self._pwm_b.value = self.speed
         self._motor_a.forward()
@@ -119,6 +122,7 @@ class MotorController:
         self._pwm_b.value = 0
         self._motor_a.stop()
         self._motor_b.stop()
+        self._stby.off()  # モーターの動きを停止した後にSTBYをLOWにする
  
     def close(self):
         """リソース解放"""
@@ -127,6 +131,7 @@ class MotorController:
         self._pwm_b.close()
         self._motor_a.close()
         self._motor_b.close()
+        self._stby.close()  # STBYピンのリソース解放を追加
  
     def __enter__(self):
         return self
@@ -299,4 +304,3 @@ def main():
 # ===========================================================================
 if __name__ == "__main__":
     main()
- 

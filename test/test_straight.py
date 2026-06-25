@@ -5,9 +5,9 @@ import time
 Device.pin_factory = LGPIOFactory()
 # ピン設定（BCM番号）
 pwm_a = PWMOutputDevice(13)  # PWMA
-pwm_b = PWMOutputDevice(24)  # PWMB
+pwm_b = PWMOutputDevice(18)  # PWMB
 motor_a = Motor(forward=5, backward=6)   # AIN1, AIN2
-motor_b = Motor(forward=18, backward=23)  # BIN1, BIN2
+motor_b = Motor(forward=23, backward=24)  # BIN1, BIN2
 SPEED    = 0.8   # 速度（0.0〜1.0）
 DURATION = 10   # 前進する秒数
 def stop():

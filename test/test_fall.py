@@ -1,3 +1,42 @@
+"""
+fall.py
+=======
+落下検知 → サブキャリア脱出 → 前進 テストプログラム
+ 
+NSE2026/test/fall.py
+ 
+フロー:
+    Phase 0 : センサ初期化 & 落下検知待機
+               BNO055 の合成加速度ノルムが閾値を下回る状態が
+               FALL_COUNT_THRESHOLD 回連続したら「落下中」と判定する。
+               タイムアウト (FALL_TIMEOUT_SEC) を超えても検知できなかった
+               場合は強制的に Phase1 へ移行する。
+ 
+    Phase 1 : サブキャリア脱出
+               パラシュート/サブキャリアからの脱出を想定し、
+               ESCAPE_SEC 秒間モータを前進させる。
+ 
+    Phase 2 : 前進走行
+               FWD_SEC 秒間だけ前進して停止する。
+ 
+センサ/モータ:
+    - IMU  : BNO055  (I2C, smbus)          ← test_finishv.py と同じ
+    - 気圧 : BMP180  (I2C, smbus)          ← test_finishv.py と同じ
+    - モータ: gpiozero + lgpio             ← test_run.py と同じ
+              PWMA=BCM13, AIN1=BCM5, AIN2=BCM6
+              PWMB=BCM24, BIN1=BCM18, BIN2=BCM23
+ 
+定数:
+    FALL_THRESHOLD      合成加速度ノルム [m/s²] がこの値 "以下" のとき落下中と判定
+                        (自由落下: ≈ 0 m/s²  /  通常静止: ≈ 9.81 m/s²)
+    FALL_COUNT_THRESHOLD 連続して落下判定する必要な回数
+    FALL_TIMEOUT_SEC    落下検知のタイムアウト時間 [s]
+    ESCAPE_SEC          サブキャリア脱出モータ前進時間 [s]
+    FWD_SEC             脱出後の前進時間 [s]
+    MOTOR_SPEED         モータ出力 0.0〜1.0
+    LOOP_DT             Phase0 ループ周期 [s]
+"""
+
 import sys
 import time
 import math

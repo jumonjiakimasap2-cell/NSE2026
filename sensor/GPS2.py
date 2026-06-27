@@ -201,7 +201,8 @@ def print_gps_info():
     sep = "─" * 65
     print(sep)
 
-    if valid:
+    # 完全に数値(floatかint)であり、かつ初期値の0.0ではない場合のみ位置を表示する
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)) and lat != 0.0 and lng != 0.0:
         # 十進度 → 度分秒に変換して両方表示
         lat_deg = int(abs(lat))
         lat_min = (abs(lat) - lat_deg) * 60

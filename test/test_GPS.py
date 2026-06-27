@@ -70,6 +70,11 @@ _THIS_DIR = Path(__file__).resolve().parent   # NSE2026/sensor/
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+_CURRENT_DIR = Path(__file__).resolve().parent
+_SENSOR_DIR = _CURRENT_DIR.parent / "sensor"
+if str(_SENSOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_SENSOR_DIR))
+    
 from micropyGPS import MicropyGPS
 
 # ===========================================================================

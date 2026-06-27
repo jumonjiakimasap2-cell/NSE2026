@@ -8,8 +8,8 @@ Device.pin_factory = LGPIOFactory()
 # ピン設定（BCM番号）
 pwm_a = PWMOutputDevice(13)  # PWMA
 pwm_b = PWMOutputDevice(18)  # PWMB
-motor_a = Motor(forward=5, backward=6)   # AIN1, AIN2
-motor_b = Motor(forward=23, backward=24) # BIN1, BIN2
+motor_a = Motor(forward=6, backward=5)   # AIN1, AIN2
+motor_b = Motor(forward=24, backward=23) # BIN1, BIN2
 stby = OutputDevice(11)                  # MOTOR_STBY (追加)
 
 SPEED    = 0.8   # 速度（0.0〜1.0）

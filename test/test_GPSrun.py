@@ -99,7 +99,7 @@ SPEED_TURN  = 0.8           # 旋回時 外輪 PWM duty
 SPEED_WEAK  = 0.4           # 弱旋回時 内輪 PWM duty (弱左/弱右)
 
 # --- GPS ---
-GPS_PORT     = "/dev/ttyAMA0"
+GPS_PORT     = "/dev/serial0"
 GPS_BAUDRATE = 9600
 GPS_FIX_TIMEOUT = 120.0     # [s]  Fix 待機タイムアウト
 

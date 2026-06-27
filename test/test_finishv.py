@@ -54,7 +54,7 @@ from micropyGPS import MicropyGPS
 # ===========================================================================
  
 LOOP_INTERVAL = 0.02          # メインループ周期 [s]  (約 50 Hz)
-GPS_PORT      = "/dev/ttyAMA0"
+GPS_PORT      = "/dev/serial0"
 GPS_BAUDRATE  = 9600
 LOG_DIR       = Path(__file__).resolve().parent.parent / "logs"
  

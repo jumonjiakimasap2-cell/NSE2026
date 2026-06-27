@@ -48,7 +48,7 @@ from micropyGPS import MicropyGPS
 # 設定
 # ===========================================================================
 
-PORT         = "/dev/ttys0"   # test_finishv.py / test_GPSrun.py と統一
+PORT         = "/dev/serial0"   # test_finishv.py / test_GPSrun.py と統一
 BAUDRATE     = 9600
 LOCAL_OFFSET = 9                # JST (+9h)
 DISPLAY_HZ   = 1.0             # 表示更新レート [Hz]  (1 秒に 1 回)

@@ -58,6 +58,22 @@ def right():
     motor_a.forward()
     motor_b.forward()
 
+# ===== キー入力（1文字取得）=====
+def get_key():
+    try:
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return ch.lower()
+    except:
+        return input().strip().lower()
+
+
 # W/A/S/Dキー操作ループ
 try:
     print("操作開始：W/A/S/D で移動、Space で停止、Q で終了")

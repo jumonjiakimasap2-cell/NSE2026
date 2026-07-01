@@ -52,35 +52,29 @@ def main():
         return
 
     # ------------------------------------------------------------
-    # 【Step 2】 SSHサービス停止 ＆ 30秒間のLED点滅（切断状態）
+    # 【Step 2】 SSHサービス停止 ＆ 自動復活の予約
     # ------------------------------------------------------------
     print("\n" + "-" * 60)
-    print("[ ⚠️ 命令発信 ] Step 2: ラズパイのSSHサービスを強制停止します。")
+    print("[ ⚠️ 命令発信 ] Step 2: ラズパイのSSHサービスを停止し、自動復活を予約します。")
     print("-" * 60)
     
     try:
-        # ラズパイ側で 'sudo systemctl stop ssh' をバックグラウンド実行
-        # (パスワードなしsudo設定が前提。プロセスが即座に切断されるため、ノンブロッキングで送信)
-        transport = ssh.get_transport()
-        channel = transport.open_session()
-        channel.exec_command("sudo systemctl stop ssh")
+        # ★ポイント: SSHを止める前に、「60秒後にSSHを開始する」というバックグラウンドタイマーをラズパイに仕込む
+        # これにより、SSH切断に巻き込まれてもラズパイ自身が必ず復活します
+        cmd_trigger = "sudo sh -c 'sleep 60 && systemctl start ssh' > /dev/null 2>&1 &"
+        ssh.exec_command(cmd_trigger)
+        time.sleep(1) # タイマーが確実にセットされるまで一瞬待つ
+
+        # その後、安全にSSHを停止する
+        ssh.exec_command("sudo systemctl stop ssh")
         
-        print(" [ 🔴 切断命令 ] 'systemctl stop ssh' を送信しました。")
-        ssh.close() # PC側からもセッションを綺麗に閉じる
+        print(" [ 🔴 切断命令 ] 自動復活タイマー(60秒)を設定し、SSHを停止しました。")
+        ssh.close() 
         print(" [ 🔒 遮断完了 ] PC-ラズパイ間のSSHセッションは完全に切断されました。")
         
     except Exception as e:
-        print(f" [ ❌ エラー ] 停止命令の送信に失敗: {e}")
+        print(f" [ ❌ エラー ] 命令の送信に失敗: {e}")
         return
-
-    print(f"\n[ ⏳ Step 2 ] ラズパイ側は現在『接続オフ（LED 1秒間隔点滅中）』フェーズです。")
-    print(f"              このまま規定の {SSH_OFF_SEC:.0f} 秒間、通信途絶を維持します。")
-    
-    # 30秒間のカウントダウン
-    for i in range(int(SSH_OFF_SEC), 0, -1):
-        if i % 5 == 0 or i <= 5: # ログがうるさくならないよう5秒ごと、最後は1秒ごと
-            print(f"   ┗ サービス停止維持（LED点滅中）: 残り {i} 秒...")
-        time.sleep(1)
 
     # ------------------------------------------------------------
     # 【Step 3】 SSH復活待機 ＆ 10秒間の再点灯確認

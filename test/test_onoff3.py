@@ -8,7 +8,7 @@ import paramiko
 # ★ IPアドレスを使わない方法（mDNS）を適用
 RPI_HOST    = "raspberrypi.local"  
 USER        = "pi"
-PASS        = "your_password"
+PASS        = "pi"
 
 # 物理40番ピン = BCM 21番
 LED_PIN     = 21

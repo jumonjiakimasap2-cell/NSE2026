@@ -66,41 +66,33 @@ def main():
         print(f" [ ❌ 接続失敗 ] ラズパイが見つからないか、SSHが無効です: {e}")
         return
 
-   # ------------------------------------------------------------
-    # 【Step 2】 SSHサービス停止 ＆ 60秒間のLED点滅（2フェーズ安全分離版）
+ # ------------------------------------------------------------
+    # 【Step 2】 SSHサービス停止 ＆ 60秒間のLED点滅（ファイル実行版）
     # ------------------------------------------------------------
     print("\n" + "-" * 60)
-    print("[ ⚠️ 命令発信 ] Step 2: SSHサービスを停止し、LED点滅と自動復活を予約します。")
+    print("[ ⚠️ 命令発信 ] Step 2: ラズパイ側の専用スクリプトを実行し、セッションを切断します。")
     print("-" * 60)
     
     try:
-        # 【1番目の命令】まず「LEDを60秒間点滅させ、最後にSSHを起動する」というPythonを
-        # nohupを使ってラズパイのバックグラウンドで完全に切り離して起動します。
-        # 単純な1行コマンド（セミコロン区切り）にすることで、Windowsの解釈エラーを完全に防ぎます。
-        led_and_recovery_cmd = (
-            f"nohup python3 -c \""
-            f"from gpiozero import LED; from gpiozero.pins.lgpio import LGPIOFactory; from gpiozero import Device; "
-            f"import time, subprocess; "
-            f"Device.pin_factory = LGPIOFactory(); led = LED({LED_PIN}); "
-            f"start_time = time.time(); "
-            f"while time.time() - start_time < {SSH_OFF_SEC}: led.on(); time.sleep(0.5); led.off(); time.sleep(0.5); "
-            f"subprocess.run(['sudo', 'systemctl', 'start', 'ssh']);" # 60秒後に自分でSSHを立ち上げる
-            f"\" > /dev/null 2>&1 &"
-        )
-        ssh.exec_command(led_and_recovery_cmd)
-        time.sleep(1.0) # ラズパイ側で点滅処理が確実に動き出すのを待つ（ここでチカチカが始まります）
-
-        # 【2番目の命令】点滅が始まったのを確認して、おもむろにSSHサービスを停止する
-        ssh.exec_command("sudo systemctl stop ssh")
-        time.sleep(0.5)
+        # ラズパイ側にあらかじめ作っておいたスクリプトを、nohupで完全に切り離して実行します。
+        # 文字列に記号や改行が含まれないため、Windowsのコマンド解釈バグが絶対に起きません。
+        ssh.exec_command("nohup python3 /home/pi/rpi_blink.py > /dev/null 2>&1 &")
+        time.sleep(1.5) # ラズパイ側でスクリプトが確実に走り出すのを待つ
         
-        print(" [ 🔴 切断命令 ] ラズパイ側で『自律点滅＆自動復活タイマー』が起動しました。")
+        print(" [ 🔴 切断命令 ] ラズパイ側で『rpi_blink.py』が自律起動しました。")
         ssh.close() 
-        print(" [ 🔒 遮断完了 ] PC-ラズパイ間のSSHセッションは完全に切断されました。")
+        print(" [ 🔒 遮断完了 ] PC-ラズパイ間のSSHセッションを閉じました。")
         
     except Exception as e:
-        print(f" [ ❌ エラー ] 停止命令の送信に失敗: {e}")
+        print(f" [ ❌ エラー ] 命令の送信に失敗: {e}")
         return
+
+    # ★ここでスキップさせないため、PC側でも明示的に確実に60秒待機させます
+    print(f"\n[ ⏳ Step 2 ] カウントダウンを開始します（規定時間: {SSH_OFF_SEC:.0f} 秒）")
+    for i in range(int(SSH_OFF_SEC), 0, -1):
+        if i % 5 == 0 or i <= 5: 
+            print(f"   ┗ 通信遮断・ラズパイ自律点滅中: 残り {i} 秒...")
+        time.sleep(1)
 
     # ------------------------------------------------------------
     # 【Step 3】 SSH復活待機 ＆ 10秒間の再点灯確認

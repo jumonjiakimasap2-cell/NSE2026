@@ -66,41 +66,35 @@ def main():
         print(f" [ ❌ 接続失敗 ] ラズパイが見つからないか、SSHが無効です: {e}")
         return
 
-    # ------------------------------------------------------------
-    # 【Step 2】 SSHサービス停止 ＆ 60秒間のLED点滅（自動復帰予約付き）
-    # ------------------------------------------------------------
    # ------------------------------------------------------------
-    # 【Step 2】 SSHサービス停止 ＆ 60秒間のLED点滅（完全分離版）
+    # 【Step 2】 SSHサービス停止 ＆ 60秒間のLED点滅（2フェーズ安全分離版）
     # ------------------------------------------------------------
     print("\n" + "-" * 60)
     print("[ ⚠️ 命令発信 ] Step 2: SSHサービスを停止し、LED点滅と自動復活を予約します。")
     print("-" * 60)
     
     try:
-        # ★解決策のコア部分★
-        # SSHのセッション切断に絶対に巻き込まれないよう、「nohup」と「setsid」を使って、
-        # ラズパイのOSの根本（バックグラウンド）で完全に独立した点滅＆復活プロセスを立ち上げます。
-        rpi_script = (
-            f"nohup setsid python3 -c \"\n"
-            f"from gpiozero import LED\n"
-            f"from gpiozero.pins.lgpio import LGPIOFactory\n"
-            f"from gpiozero import Device\n"
-            f"Device.pin_factory = LGPIOFactory()\n"
-            f"led = LED({LED_PIN})\n"
-            f"import time, subprocess\n"
-            f"subprocess.run(['sudo', 'systemctl', 'stop', 'ssh'])\n" # ここでSSHが止まっても、このPythonは死にません
-            f"start_time = time.time()\n"
-            f"while time.time() - start_time < {SSH_OFF_SEC}:\n"
-            f"    led.on(); time.sleep(0.5); led.off(); time.sleep(0.5)\n" # これで確実に点滅が維持されます
-            f"subprocess.run(['sudo', 'systemctl', 'start', 'ssh'])\n"
+        # 【1番目の命令】まず「LEDを60秒間点滅させ、最後にSSHを起動する」というPythonを
+        # nohupを使ってラズパイのバックグラウンドで完全に切り離して起動します。
+        # 単純な1行コマンド（セミコロン区切り）にすることで、Windowsの解釈エラーを完全に防ぎます。
+        led_and_recovery_cmd = (
+            f"nohup python3 -c \""
+            f"from gpiozero import LED; from gpiozero.pins.lgpio import LGPIOFactory; from gpiozero import Device; "
+            f"import time, subprocess; "
+            f"Device.pin_factory = LGPIOFactory(); led = LED({LED_PIN}); "
+            f"start_time = time.time(); "
+            f"while time.time() - start_time < {SSH_OFF_SEC}: led.on(); time.sleep(0.5); led.off(); time.sleep(0.5); "
+            f"subprocess.run(['sudo', 'systemctl', 'start', 'ssh']);" # 60秒後に自分でSSHを立ち上げる
             f"\" > /dev/null 2>&1 &"
         )
+        ssh.exec_command(led_and_recovery_cmd)
+        time.sleep(1.0) # ラズパイ側で点滅処理が確実に動き出すのを待つ（ここでチカチカが始まります）
+
+        # 【2番目の命令】点滅が始まったのを確認して、おもむろにSSHサービスを停止する
+        ssh.exec_command("sudo systemctl stop ssh")
+        time.sleep(0.5)
         
-        # コマンドをラズパイへ送信
-        ssh.exec_command(rpi_script)
-        time.sleep(1.5) # ラズパイ側でプロセスが完全に独立するのを少し待つ
-        
-        print(" [ 🔴 切断命令 ] 『点滅＆自動復活タイマー』を起動しました。")
+        print(" [ 🔴 切断命令 ] ラズパイ側で『自律点滅＆自動復活タイマー』が起動しました。")
         ssh.close() 
         print(" [ 🔒 遮断完了 ] PC-ラズパイ間のSSHセッションは完全に切断されました。")
         

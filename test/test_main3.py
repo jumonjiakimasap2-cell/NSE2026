@@ -628,38 +628,24 @@ def phase3_calibration(bno: BNO055, motor: MotorController, led: LED, start_time
     どの軸が停滞しているかを CALIB_STALL_WARN_SEC 秒単位で警告する。
     完了後、モータを停止してから静止時の水平加速度ノルムを基準値として計測して返す。
     """
+
     global phase, g_acc, g_mag, g_gyro, g_calib
     phase = 3
     blink_led(led)
     log("─" * 62)
-    log(f"[Phase3] キャリブレーション待機  最低レベル={CALIB_MIN_LEVEL}  最大={CALIB_TIMEOUT_SEC:.0f} s")
-    if FIG8_ENABLE:
-        log(f"         モータにより自律スピン動作を実行します (片方向={FIG8_SPIN_SEC:.1f} s ごとに左右切替)")
-    else:
-        log("         機体を 8 の字に動かして地磁気をキャリブレーションしてください")
-
-    # ヘッダー (リアルタイム1行表示)
-    print(f"\n{'経過[s]':>8}  {'Sys':>4}  {'Gyro':>5}  {'Acc':>4}  {'Mag':>4}  {'状態':>12}  {'Motor':>16}")
-    print("-" * 68)
-
-    p3_start   = time.time()
-    calib_ok   = False
-
-    # ── スピン動作用の状態 ──
-    fig8_dir_left    = True   # True: 左スピン中 / False: 右スピン中
+    log(f"[Phase3] キャリブレーション待機 最低レベル={CALIB_MIN_LEVEL}")
+    
+    p3_start = time.time()
     fig8_last_switch = p3_start
-    motor_cmd        = "STOP"
+    motor_cmd = "STOP"
+    
+    # 最初はモータを停止させ、加速度(Acc)とジャイロ(Gyro)のキャリブレーションを狙う
+    motor.stop()
+    log("[Phase3] ステップ1: 加速度・ジャイロ調整のため【完全静止】します...")
 
-    if FIG8_ENABLE:
-        motor.turn_left_strong()
-        motor_cmd = "SPIN_L(FIG8)"
-
-    # ── 軸ごとの進捗トラッキング (詳細ログ・停滞警告用) ──
     AXIS_NAMES = ("Sys", "Gyro", "Acc", "Mag")
-    axis_best_level  = [0, 0, 0, 0]   # 各軸がこれまでに到達した最高レベル
-    axis_last_improve = [p3_start] * 4  # 各軸が最後にレベル改善した時刻
-    axis_stall_warned = [False] * 4     # 既に停滞警告を出したか
-    last_report_time  = p3_start
+    last_report_time = p3_start
+    fig8_started = False  # スピン開始フラグ
 
     while True:
         try:
@@ -672,79 +658,57 @@ def phase3_calibration(bno: BNO055, motor: MotorController, led: LED, start_time
             time.sleep(0.1)
             continue
 
-        now     = time.time()
+        now = time.time()
         elapsed = now - p3_start
         s, gy, ac, mg = g_calib
-        levels = (s, gy, ac, mg)
 
-        # ── 軸ごとの改善トラッキング ──
-        for i, lv in enumerate(levels):
-            if lv > axis_best_level[i]:
-                axis_best_level[i]  = lv
-                axis_last_improve[i] = now
-                axis_stall_warned[i] = False
-
-        # ── スピン動作: 左右を一定周期で切り替え ──
-        if FIG8_ENABLE:
-            if now - fig8_last_switch >= FIG8_SPIN_SEC:
-                fig8_dir_left    = not fig8_dir_left
+        # ──【重要】加速度とジャイロが目標値に達したら、地磁気促進のためのスピンを開始する ──
+        if not fig8_started and ac >= CALIB_MIN_LEVEL and gy >= CALIB_MIN_LEVEL:
+            if FIG8_ENABLE:
+                log("[Phase3] ステップ2: 加速度/ジャイロOK。地磁気(Mag)調整のため【自律スピン】を開始します！")
+                motor.turn_left_strong()
+                motor_cmd = "SPIN_L(FIG8)"
                 fig8_last_switch = now
-                if fig8_dir_left:
-                    motor.turn_left_strong()
-                    motor_cmd = "SPIN_L(FIG8)"
-                else:
+                fig8_started = True
+            else:
+                log("[Phase3] 加速度/ジャイロOK。手動で地磁気を調整してください。")
+                fig8_started = True
+
+        # スピン動作中の左右切り替え (ステップ2移行後のみ)
+        if FIG8_ENABLE and fig8_started:
+            if now - fig8_last_switch >= FIG8_SPIN_SEC:
+                fig8_last_switch = now
+                if motor_cmd == "SPIN_L(FIG8)":
                     motor.turn_right_strong()
                     motor_cmd = "SPIN_R(FIG8)"
+                else:
+                    motor.turn_left_strong()
+                    motor_cmd = "SPIN_L(FIG8)"
 
-        # キャリブレーション状態の判定
+        # 状態判定用文字列
         if s >= CALIB_MIN_LEVEL and gy >= CALIB_MIN_LEVEL and ac >= CALIB_MIN_LEVEL and mg >= CALIB_MIN_LEVEL:
             status = "OK ✓"
+        elif ac < CALIB_MIN_LEVEL:
+            status = "Acc 不足(静止要)"
         elif mg < CALIB_MIN_LEVEL:
-            status = "Mag 不足"
-        elif gy < CALIB_MIN_LEVEL:
-            status = "Gyro 不足"
+            status = "Mag 不足(回転要)"
         else:
             status = "待機中..."
 
-        # ── リアルタイム1行表示 (従来通り) ──
         print(f"{elapsed:>8.2f}  {s:>4d}  {gy:>5d}  {ac:>4d}  {mg:>4d}  {status:>12}  {motor_cmd:>16}", flush=True)
-        log_sensor_row(time.time() - start_time, motor_cmd, status)
-
-        # ── 停滞警告: 各軸が CALIB_STALL_WARN_SEC 秒改善していなければ警告 ──
-        for i, name in enumerate(AXIS_NAMES):
-            if levels[i] < CALIB_MIN_LEVEL and not axis_stall_warned[i]:
-                stall_sec = now - axis_last_improve[i]
-                if stall_sec >= CALIB_STALL_WARN_SEC:
-                    axis_stall_warned[i] = True
-                    hint = ""
-                    if name == "Mag":
-                        hint = " (金属製の物や電源ケーブル等の磁気源から離してください)"
-                    elif name == "Gyro":
-                        hint = " (機体を一定時間静止させる時間も必要です)"
-                    log(f"[Phase3][WARN] {name} 軸が {stall_sec:.0f} 秒間レベル{levels[i]}のまま停滞しています。{hint}", "WARN")
-
-        # ── まとめレポート (CALIB_REPORT_INTERVAL_SEC 秒ごと) ──
-        if now - last_report_time >= CALIB_REPORT_INTERVAL_SEC:
-            last_report_time = now
-            bars = "  ".join(f"{name}={lv}/3" for name, lv in zip(AXIS_NAMES, levels))
-            log(f"[Phase3] 経過{elapsed:6.1f}s  {bars}  motor={motor_cmd}")
 
         if s >= CALIB_MIN_LEVEL and gy >= CALIB_MIN_LEVEL and ac >= CALIB_MIN_LEVEL and mg >= CALIB_MIN_LEVEL:
-            log(f"[Phase3] キャリブレーション完了！ Sys={s} Gyro={gy} Acc={ac} Mag={mg}  (所要 {elapsed:.1f} s)")
-            calib_ok = True
+            log(f"[Phase3] キャリブレーション完了！ (所要 {elapsed:.1f} s)")
             break
 
         if elapsed > CALIB_TIMEOUT_SEC:
-            unmet = [name for name, lv in zip(AXIS_NAMES, levels) if lv < CALIB_MIN_LEVEL]
-            log(f"[Phase3] キャリブレーションタイムアウト。現状で続行します。 Sys={s} Gyro={gy} Acc={ac} Mag={mg}", "WARN")
-            log(f"[Phase3] 未達の軸: {', '.join(unmet) if unmet else 'なし'}", "WARN")
+            log("[Phase3] タイムアウト。現状で続行します。", "WARN")
             break
 
         time.sleep(0.2)
 
-    # スピン動作を終了し、必ず停止する (静止基準加速度の計測のため)
     motor.stop()
-    log("[Phase3] スピン動作終了 → 停止")
+    # (以下、既存の静止基準加速度計測処理へ続く...)
 
     # ── 静止時水平加速度の基準計測 ──
     log(f"[Phase3] 静止基準加速度を {CALIB_ACC_MEASURE_SEC:.0f} 秒計測...")

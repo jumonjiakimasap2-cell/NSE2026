@@ -1,0 +1,17 @@
+[Unit]
+Description=Send Raspberry Pi IP address to Discord
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/NSE2026
+ExecStart=/home/pi/NSE2026/scripts/discord_ip.sh
+TimeoutStartSec=6min
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

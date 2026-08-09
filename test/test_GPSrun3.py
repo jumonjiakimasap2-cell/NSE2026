@@ -238,11 +238,11 @@ def calc_direction_diff(azimuth: float, target_bearing: float) -> float:
 # ===========================================================================
 
 PIN_PWMA = 13
-PIN_AIN1 =  5
-PIN_AIN2 =  6
+PIN_AIN1 =  6
+PIN_AIN2 =  5
 PIN_PWMB = 18
-PIN_BIN1 = 23
-PIN_BIN2 = 24
+PIN_BIN1 = 24
+PIN_BIN2 = 23
 PIN_STBY = 11  # STBYピン
 
 

@@ -18,9 +18,13 @@ NSE2026/main/main.py
                 FALL_COUNT_THRESHOLD 回連続 → 落下確定。
                 FALL_TIMEOUT_SEC 経過でタイムアウト強制移行。
 
-    Phase 2 : モータ後退 (30 秒) → 停止 (5 秒) → 前進 (10 秒)
-                サブキャリア脱出 + 初期移動として 30 秒後退し、
-                5 秒停止して切り替えを落ち着かせた後、確実に
+    Phase 2 : 超音波分離検知後退 → 停止 (5 秒) → 前進 (10 秒)
+                サブキャリア脱出のため後退する。★変更: 固定30秒ではなく、
+                前方の超音波センサでサブキャリアとの距離を継続監視し、
+                分離した瞬間に生じる距離の急増 (PHASE2_SONAR_JUMP_THRESH_M
+                以上) を検知した時点で後退を打ち切る (検知できない場合は
+                PHASE2_BACK_TIMEOUT_SEC で安全タイムアウト)。
+                後退完了後、5 秒停止して切り替えを落ち着かせた後、確実に
                 サブキャリアから離脱・前方へ距離を取るために
                 10 秒前進する。
 
@@ -40,12 +44,40 @@ NSE2026/main/main.py
                 誤ってカウントしないようにした。
                 CALIB_REPORT_INTERVAL_SEC ごとに詳細な進捗をログへ出力し、
                 特定軸が停滞している場合は CALIB_STALL_WARN_SEC ごとに警告する。
+                【改良】実機ログ解析の結果、地上機は姿勢を変えられないため
+                Acc(加速度)キャリブレーションレベルが構造的に 0 から絶対に
+                上がらず、CALIB_TIMEOUT_SEC まで毎回タイムアウトしていたことが
+                判明した。そのため CALIB_MIN_LEVEL_ACC を 0 (要求しない) に
+                変更し、Sys/Gyro/Mag のみで完了判定するようにした。
                 キャリブレーション後、静止基準加速度(スタック検知用)を測定し、
                 続けて GPS Fix の安定化・平均化 (衛星数チェック + 複数サンプル
                 平均) を行い、誘導走行開始時点での距離・方位を確認する。
 
     Phase 4 : GPS 誘導走行 (目標地点 PHASE4_TO_5_RADIUS = 2 m 以内まで)
                 GPS + 地磁気で目標座標を追跡し前進。
+                【改良】実機ログ解析の結果、(1) モータへの高デューティ通電中に
+                地磁気センサの値が100ms間隔で数十〜100度以上ジャンプする
+                ほどのノイズ(モータ電流による磁気干渉と推定)が発生し、
+                機体方位が暴れて目標から遠ざかる事例が確認された。これに
+                対応するため、地磁気ベクトルへ EMA(指数移動平均)フィルタ
+                (calc_azimuth_with_front 内, MAG_EMA_ALPHA) を適用して
+                ノイズを平滑化するようにした。(2) 距離・方位角の計算式を、
+                従来の平面近似からより厳密な Haversine 距離公式・大圆初期
+                方位角公式に変更し、精度を高めた。
+                【安全ロック】Phase4 の開始から終了まで、モータの
+                後退方向への回転を絶対に禁止する安全ロックを有効化する。
+                backward() が万一 (バグ・将来の改修等で) 呼ばれても、
+                MotorController 側で物理的に後退させず停止のみ行う
+                (Phase4終了時にロックは解除され、以降のフェーズには影響しない)。
+                【改良/修正】方位計算式に東西が反転する重大なバグ
+                (az *= -1) があったため削除して修正した。また、以前は
+                Phase4 開始時に「前方候補を実際に前進走行させて GPS 距離の
+                変化から探索する」方式だったが、候補を切り替えても機体を
+                実際に回転させずに毎回同じ方向へ直進していたため、
+                前方候補を正しく判別できない欠陥があった。この方式を廃止し、
+                BNO055 の Axis Remap 機能 (BNO_ORIENTATION, Phase0で1回設定)
+                でセンサ内部の基準軸を機体の物理的な取り付け向きに合わせて
+                再配置する、より確実で単純な方式に変更した。
                 スタック検知 (超音波 + 水平加速度 + GPS速度) で障害物を回避する。
                 【改良】実運用でスタックしていないのに誤検知する事例があった
                 ため、判定を厳格化した: 水平加速度による判定は「前進」を
@@ -65,12 +97,14 @@ NSE2026/main/main.py
                 目標まで PHASE4_TO_5_RADIUS 以内に入ったら Phase4 を終了し
                 Phase5 へ移行する (タイムアウト時はそのままミッション終了)。
 
-    Phase 5 : 超音波センサによる最終接近 (★追加)
+    Phase 5 : 超音波センサによる最終接近 (★変更: 左右スキャン方式)
                 GPS 精度ではこれ以上距離を詰められないため、前方の超音波
                 センサでゴールに設置された物体との距離を直接測定しながら
-                近づく。turn_left_weak / turn_right_weak (両輪前進しつつ
-                片側だけ弱める動き) を FINAL_WIGGLE_SEC (0.1秒) ごとに
-                左右交互に切り替えることで、蛇行しながら前進を続ける。
+                近づく。★変更: 従来は距離を判断に使わず機械的に左右へ
+                振っていたが、これを「左に旋回して距離測定 → 右に旋回して
+                距離測定 → 近かった方向へ向き直しながら前進」という、
+                超音波センサの値に基づいて能動的に対象物へ機体を向けていく
+                方式に変更した (FINAL_SCAN_SEC ごとに1サイクル)。
                 前方オブジェクトとの距離が FINAL_STOP_DIST_M (0.05 m) 以下
                 になったら「0距離到達」とみなしてモータを停止し、ミッション
                 完了とする。FINAL_APPROACH_TIMEOUT_SEC で安全タイムアウト。
@@ -151,8 +185,24 @@ FALL_COUNT_THRESHOLD = 8    # 連続カウント数
 FALL_TIMEOUT_SEC     = 7 * 60  # [s]  7 分でタイムアウト
 
 # --- Phase 2: 初期後退 + 停止 + 前進 ------------------------------------------
-PHASE2_BACK_SEC      = 30.0  # [s]  後退秒数
-PHASE2_PAUSE_SEC     =  5.0  # [s]  ★変更: 後退後の停止秒数 (後退→前進の切り替え待ち)
+# ★変更: 従来は PHASE2_BACK_SEC (固定30秒) で後退していたが、パラシュート/
+#        サブキャリアからの分離タイミングは機体の落下姿勢や地面との接触状況で
+#        毎回変わるため、固定秒数では「分離できていないのに後退をやめる」
+#        「分離済みなのに無駄に後退を続ける」の両方のリスクがあった。
+#        そこで前方(進行方向とは反対、後退中は「背面」ではなく後退前に
+#        機体前方に設置されている超音波センサがサブキャリアの方を向いている
+#        前提)の超音波センサで距離を監視し、サブキャリアから機体が分離した
+#        瞬間に生じる距離の急増 (PHASE2_SONAR_JUMP_THRESH_M 以上) を検知して
+#        その場で後退を打ち切る方式に変更した。
+PHASE2_BACK_TIMEOUT_SEC     = 30.0  # [s]  安全タイムアウト (分離検知できない場合の後退上限)
+PHASE2_BACK_MIN_SEC         =  3.0  # [s]  後退開始直後はセンサ値が乱れやすいため、
+                                     #      この秒数が経過するまでは分離判定を行わない
+PHASE2_SONAR_JUMP_THRESH_M  = 0.5   # [m]  直前の有効値からこれ以上距離が急増したら
+                                     #      「サブキャリアから分離した」と判定する
+PHASE2_SONAR_LOST_TIMEOUT_SEC = 5.0 # [s]  超音波が有効値を返さない状態がこれだけ続いたら
+                                     #      警告ログを出す (判定自体は継続)
+PHASE2_LOOP_DT       =  0.1  # [s]  後退中の監視ループ周期
+PHASE2_PAUSE_SEC     =  5.0  # [s]  後退後の停止秒数 (後退→前進の切り替え待ち)
 PHASE2_FWD_AFTER_SEC = 10.0  # [s]  後退・停止後に行う前進秒数
 
 # --- Phase 3: キャリブレーション ----------------------------------------------
@@ -161,10 +211,26 @@ PHASE2_FWD_AFTER_SEC = 10.0  # [s]  後退・停止後に行う前進秒数
 #        地上機は姿勢を大きく変えられず Acc の複数姿勢キャリブレーションが困難なため、
 #        軸ごとに現実的な目標レベルを個別に設定できるようにした。
 #        (Mag は自律スピンで比較的到達しやすいので従来通り高めのままにしている)
+#
+# ★重要な追加変更: 実機ログを分析した結果、CALIB_MIN_LEVEL_ACC=1 でも
+#        180秒のタイムアウトまで一度も達成できず、Acc=0 のまま停滞し続けて
+#        いたことが判明した。BNO055 の加速度センサキャリブレーションは、
+#        内部アルゴリズム上「機体を6方向以上の異なる姿勢 (上下反転を含む)
+#        で数秒間静止させる」ことを要求する。しかし本機は地上を走行する
+#        平面移動ロボットであり、物理的に姿勢を変える手段が無いため、
+#        Acc キャリブレーションレベルが 0 から絶対に上がらない
+#        (=どれだけ待っても目標に到達できない) という構造的な限界がある。
+#        このため CALIB_MIN_LEVEL_ACC は要求しない (=0) ものとし、
+#        Sys/Gyro/Mag のみで完了判定を行うように変更した。
+#        なお、Acc が未キャリブレーションであっても、Phase3 完了後に
+#        測定する静止基準水平加速度 (baseline_horiz_acc) が実行時の
+#        オフセットを実質的に補正するため、落下検知・スタック検知への
+#        影響は限定的である。
 CALIB_MIN_LEVEL_SYS  = 1    # 0〜3  システム全体 (他軸がある程度揃えば自然に上がることが多い)
 CALIB_MIN_LEVEL_GYRO = 1    # 0〜3  ★緩和: 静止だけで上がるはずだが、モータ振動の余韻等で
                             #        上がりにくい場合があるため要求を下げた
-CALIB_MIN_LEVEL_ACC  = 1    # 0〜3  ★緩和: 地上機は複数姿勢を取れないため 2 以上は現実的に困難
+CALIB_MIN_LEVEL_ACC  = 0    # 0〜3  ★変更: 地上機は複数姿勢を取れず物理的に到達不可能なため、
+                            #        Acc キャリブレーションは要求しない (常に条件を満たす)
 CALIB_MIN_LEVEL_MAG  = 2    # 0〜3  スピンで比較的到達しやすいので維持
 CALIB_TIMEOUT_SEC = 180.0   # [s]  キャリブレーション待機タイムアウト (地上機なので少し長め)
 # スタック検知用：水平加速度の「動いているとき」の基準を測る秒数
@@ -236,17 +302,30 @@ STUCK_RECOVER_MAX_RETRIES       = 5      # [回] 前進中の再スタック→9
 # ★追加: 走行フェーズで目標までの距離・方位ずれをまとめてログ表示する周期
 NAV_REPORT_INTERVAL_SEC = 5.0  # [s]
 
-# --- Phase 5: 超音波センサによる最終接近 (★追加) -----------------------------
+# --- Phase 4: 前方補正 (★変更) -----------------------------------------------
+# ★変更: 以前は前方候補を4通り用意しGPS試行で自動探索する方式だったが、
+#        欠陥があった (候補を切り替えても実際には機体を回転させておらず、
+#        全候補で同じ方向に直進していただけで判別になっていなかった)。
+#        BNO055 の Axis Remap 機能 (BNO_ORIENTATION, set_bno_orientation)
+#        で Phase0 の初期化時に一度だけ設定する方式に置き換えたため、
+#        Phase4 側で前方候補を探索する処理は不要になった。
+
+# --- Phase 5: 超音波センサによる最終接近 (★変更: 左右スキャン方式) ------------
 # Phase4 で目標まで PHASE4_TO_5_RADIUS 以内に入ったら開始する最終フェーズ。
 # GPS はこれ以上正確に距離を詰められないため、前方の超音波センサで
-# 目標物(ゴールに設置された物体)を検知しながら、機体を左右に小刻みに
-# 振って(=左右の弱旋回を交互に行い、前進しつつ蛇行する)近づき、
-# 前方物体との距離が FINAL_STOP_DIST_M 以下になったら「0距離到達」として終了する。
+# 目標物(ゴールに設置された物体)を検知しながら接近する。
+# ★変更: 従来は距離を判断に使わず機械的に左右へ振っていたが、これを
+#        「左に旋回しながら距離を測定 → 右に旋回しながら距離を測定 →
+#        近かった方向へ旋回して進む」という、超音波センサの値に基づいて
+#        能動的に対象物へ機体を向けていく方式に変更した。
+#        (超音波センサは指向性があるため、旋回してその方向の距離が短く
+#        なるほど、その方向に対象物が存在する可能性が高いという前提)
 FINAL_STOP_DIST_M      = 0.05   # [m]  この距離以下で最終接近完了 (ゴール)
-FINAL_WIGGLE_SEC        = 0.1   # [s]  左右に振る際の片側あたりの継続時間
+FINAL_SCAN_SEC          = 0.3   # [s]  左/右それぞれの旋回スキャンにかける時間
 FINAL_APPROACH_TIMEOUT_SEC = 5 * 60  # [s]  Phase5 の安全タイムアウト (5分)
 FINAL_NAV_REPORT_INTERVAL_SEC = 3.0  # [s]  距離・方位ずれのまとめログ周期
 FINAL_SONAR_LOST_WARN_SEC = 15.0     # [s]  超音波が有効値を返さない状態がこの秒数続いたら警告
+FINAL_SCAN_LOOP_DT      = 0.02  # [s]  スキャン中の超音波サンプリング周期
 
 # --- モータ: ソフトスタート (デューティ比の段階的引き上げ) (★追加) ---------
 # 停止状態から動き出す瞬間にいきなり高いデューティ比をかけると、
@@ -268,10 +347,11 @@ RAMP_UPDATE_INTERVAL_SEC = 0.2  # [s] バックグラウンドでデューティ
 SPEED_WEAK  = 0.4                          # [-] 従来の弱旋回側 duty (比率計算の元値として保持)
 WEAK_RATIO  = SPEED_WEAK / RAMP_START_DUTY  # [-] 強旋回側に対する弱旋回側の出力比率 (デフォルト 0.5)
 
-# ★追加: 誘導走行フェーズ (Phase4) だけモータの IN/OUT (forward/backward) を
+# ★変更: 誘導走行フェーズ (Phase4) だけモータの IN/OUT (forward/backward) を
 #        一時的に反転させるフラグ。配線都合等で forward 指示が実際には
 #        後退になってしまう場合の暫定対応。Phase2/Phase3/Phase5 には影響しない。
-PHASE4_MOTOR_REVERSED = True
+#        ★実地確認により、従来の反転設定 (True) は逆だったため False へ変更。
+PHASE4_MOTOR_REVERSED = False
 
 # モータピン (BCM) ← test_run.py / test_avoid.py と統一
 PIN_PWMA = 13
@@ -298,7 +378,11 @@ SONAR_TIMEOUT   = 0.03      # [s]
 SOUND_SPEED     = 343.0     # [m/s]
 
 # 地球半径
-EARTH_RADIUS = 6378136.59   # [m]
+# ★変更: 従来は赤道半径 (6378136.59m) を使った平面近似 (等長円筒図法) で
+#        distance/bearing を計算していたが、より標準的で精度の高い
+#        Haversine距離 / 大圆初期方位角の式に変更したため、それに対応する
+#        地球の平均半径 (WGS84 authalic mean radius に近い一般的な値) を使用する。
+EARTH_RADIUS = 6371000.0   # [m]  Haversine計算用の地球平均半径
 
 # ログ
 LOG_DIR = _ROOT_DIR / "logs"
@@ -323,6 +407,21 @@ g_gps_speed  = 0.0
 g_gps_sats   = 0
 g_gps_valid  = False
 g_sonar_m    = None             # None = 測定失敗
+
+# ★削除: 前方オフセット関連のグローバル変数 (g_front_offset_deg /
+#        g_front_candidate) は、前方補正を BNO055 の Axis Remap
+#        (BNO_ORIENTATION) に一本化したことに伴い不要になったため削除。
+
+# ★追加: 地磁気ベクトルの平滑化 (EMA: 指数移動平均) 状態。
+#        実機ログ解析により、モータへ高デューティで通電している間、
+#        地磁気センサの読み取り値が100ms間隔で数十〜100度以上も
+#        ジャンプするほどのノイズ (モータ電流による磁気干渉と推定) が
+#        発生し、これが原因で機体方位が暴れて GPS 誘導が発散
+#        (目標から遠ざかる) することが確認された。calc_azimuth_with_front()
+#        内でこの EMA フィルタを適用し、瞬間的なノイズの影響を抑える。
+g_mag_ema = None   # [x, y, z] の平滑化済みベクトル。None = 未初期化 (最初のサンプルで初期化)
+MAG_EMA_ALPHA = 0.25   # [-] 0〜1。小さいほど平滑化が強い(応答は遅くなる)。
+                       #     新規サンプルの反映比率: new = alpha*sample + (1-alpha)*old
 
 # ログバッファ
 log_rows  = []
@@ -575,6 +674,15 @@ class MotorController:
         #        set_reversed() で特定フェーズだけ有効化することを想定。
         self._reversed = False
 
+        # ★追加: 後退方向への回転を絶対に禁止する安全ロック。
+        #        True の間は backward() が呼ばれても実際には後退させず、
+        #        警告ログを出して停止のみ行う。Phase4 (誘導走行・
+        #        スタック回復) のように「いかなる場合も後退してはならない」
+        #        フェーズで set_forward_only(True) を呼んで有効化する想定。
+        #        コード上のバグや将来の変更で誤って backward() が呼ばれても
+        #        物理的に後退できないようにする、最後の防波堤として機能する。
+        self._forward_only = False
+
         # ★追加: ソフトスタート (デューティ比 段階的引き上げ) 用の状態。
         #   バックグラウンドスレッド (_ramp_loop) が RAMP_UPDATE_INTERVAL_SEC
         #   ごとに「動き始めてからの経過時間」に応じたデューティ比を計算して
@@ -604,6 +712,20 @@ class MotorController:
         state = "反転" if reversed_ else "通常"
         log(f"モータ方向を{state}モードに設定 (reversed={reversed_})")
         self._reversed = reversed_
+
+    def set_forward_only(self, enabled: bool):
+        """
+        ★追加: 後退方向への回転を絶対に禁止する安全ロックを有効/無効にする。
+        有効化 (True) すると、以降 backward() が呼ばれても実際には
+        モータを後退方向へ一切回転させず、警告ログを出して stop() のみ
+        行う (＝呼び出し元がミスをしても物理的に後退できない)。
+        Phase4 (誘導走行・スタック回復) のように、後退動作が
+        絶対に許されないフェーズの開始時に True、終了時に False へ戻す
+        使い方を想定している。
+        """
+        state = "有効(backward()は無効化)" if enabled else "無効(通常通り)"
+        log(f"[Motor] 後退禁止モードを{state}に設定")
+        self._forward_only = enabled
 
     # ── 反転フラグを考慮した低レベルヘルパー ──
     def _a_fwd(self):
@@ -680,6 +802,15 @@ class MotorController:
         self._b_fwd()
 
     def backward(self):
+        # ★追加: 後退禁止ロック中は、実際には後退させず安全に停止するだけ。
+        #        Phase4 等「絶対に後退してはならない」フェーズ中に
+        #        誤って backward() が呼ばれても、物理的に後退できない
+        #        ようにするための最終防波堤。
+        if self._forward_only:
+            log("[Motor][WARN] 後退禁止モード中に backward() が呼び出されました。"
+                "安全のため後退はせず停止します。", "WARN")
+            self.stop()
+            return
         self._start_move(1.0, 1.0)
         self._a_back()
         self._b_back()
@@ -742,22 +873,63 @@ class MotorController:
         self._stby.close()
 
 # ===========================================================================
-# 航法計算 (test_GPSrun.py と同一)
+# 航法計算 (★変更: Haversine距離 + 大圆初期方位角の標準公式に変更)
 # ===========================================================================
+# ★変更: 従来は「経度差×cos(lat)×地球半径」「緯度差×地球半径」による
+#        平面近似 (等長円筒図法, 十数m規模ではこれでも大きな誤差は出ないが
+#        厳密ではない) で距離・方位を求めていた。実運用ログを分析した結果、
+#        この近似式自体の数値は手計算とも一致しており大きなバグは無かったが、
+#        「精度をさらに上げてほしい」との要望と、GPS誘導の信頼性を少しでも
+#        高める目的で、球面三角法に基づく標準的な Haversine 距離公式・
+#        大圆(great-circle)初期方位角公式に置き換えた。緯度によって
+#        経度1度あたりの実距離が変わる影響も正確に扱えるため、より高緯度や
+#        長距離でも精度が保たれる。
 
 def calc_distance(lat, lng) -> float:
-    dx = math.radians(TARGET_LNG - lng) * EARTH_RADIUS * math.cos(math.radians(lat))
-    dy = math.radians(TARGET_LAT - lat) * EARTH_RADIUS
-    return math.hypot(dx, dy)
+    """
+    Haversine の公式による現在地から目標地点までの球面距離 [m]。
+    平面近似より厳密に地球の曲率を考慮するため、緯度・経度差が
+    大きい場合でも誤差が蓄積しにくい。
+    """
+    lat1 = math.radians(lat)
+    lat2 = math.radians(TARGET_LAT)
+    dlat = math.radians(TARGET_LAT - lat)
+    dlng = math.radians(TARGET_LNG - lng)
+    a = (math.sin(dlat / 2.0) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2.0) ** 2)
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return EARTH_RADIUS * c
 
 def calc_target_bearing(lat, lng) -> float:
-    dx = math.radians(TARGET_LNG - lng) * EARTH_RADIUS * math.cos(math.radians(lat))
-    dy = math.radians(TARGET_LAT - lat) * EARTH_RADIUS
-    return (90.0 - math.degrees(math.atan2(dy, dx))) % 360.0
+    """
+    大圆 (great-circle) 初期方位角の公式による、現在地から目標地点への
+    真方位 [度, 0〜360, 北を0として時計回り]。
+    """
+    lat1 = math.radians(lat)
+    lat2 = math.radians(TARGET_LAT)
+    dlng = math.radians(TARGET_LNG - lng)
+    x = math.sin(dlng) * math.cos(lat2)
+    y = (math.cos(lat1) * math.sin(lat2)
+         - math.sin(lat1) * math.cos(lat2) * math.cos(dlng))
+    theta = math.atan2(x, y)
+    return (math.degrees(theta) + 360.0) % 360.0
 
 def calc_azimuth(mag: list) -> float:
+    """
+    生の地磁気ベクトルから磁北基準の方位角 [度, 北=0, 東=90, 南=180, 西=270,
+    時計回り] を計算する。
+
+    ★修正 (重大バグ): 従来はここで `az *= -1` という符号反転を行っていたが、
+    直前の `90.0 - atan2(mag[1], mag[0])` の時点で既に「北=0°,東=90°,
+    南=180°,西=270°」の時計回り方位になっている (calc_target_bearing() の
+    `90 - atan2(dy,dx)` と全く同じ変換パターン) ため、そこへさらに符号
+    反転をかけると東西が鏡写しになってしまう。例えば目標が実際には東に
+    あるのに「西にある」と誤認識し、機体は逆方向へ旋回し続けて
+    永久に正しい向きへ復帰できないという重大な不具合だった。
+    test_GPSrun.py 側にも同一のバグがあることを確認したため、
+    このファイルでは az *= -1 の行を削除して修正する。
+    """
     az = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
-    az *= -1
     az += MAG_DECLINATION
     return az % 360.0
 
@@ -766,6 +938,123 @@ def calc_direction_diff(azimuth: float, bearing: float) -> float:
     if diff > 180.0:
         diff -= 360.0
     return diff
+
+# ===========================================================================
+# ★変更: BNO055 軸再配置 (Axis Remap) による前方補正
+# ===========================================================================
+# BNO055 の地磁気ゼロ点(方位0°の向き)と、機体の物理的な前方(モータで
+# forward() させたときに実際に進む向き)は、センサの取り付け角度・配線・
+# 個体差等によって必ずしも一致しない。
+#
+# ★変更の経緯: 以前はこれをソフトウェア側で「前方候補 1〜4 を実際に
+# 前進走行させ、GPS距離の変化を見て正しい候補を選ぶ」という前方探索
+# (Front Search) で解決しようとしていた。しかし、この実装には重大な
+# 欠陥があった: 候補を切り替えても set_front_candidate() が内部の
+# オフセット変数を書き換えるだけで、機体を実際に回転させる動作を
+# 一切行わずに motor.forward() を呼んでいたため、候補1〜4のすべてで
+# 機体は完全に同じ物理的方向へ直進していた。そのため候補間の違いは
+# GPS測位誤差程度のノイズでしかなく、前方候補を正しく判別できず、
+# 誤った候補が採択されて航法計算全体に恒常的なズレが乗ってしまう
+# 危険があった。
+#
+# そこで test_GPSrun.py で採用されていた、BNO055 の Axis Remap 機能
+# (レジスタ 0x41=軸配置, 0x42=符号) を使ってセンサの内部基準軸を
+# 物理的な取り付け向きに合わせて再配置する方式に変更した。これは
+# BNO055 データシートに定義された正式な機能であり、GPS ノイズに
+# 依存する推測ではなく、設定した瞬間から常に一貫して正しい方位が
+# 得られる。取り付け向きは実機で 1〜4 を順に試し、目標へ向かって
+# 前進するものを BNO_ORIENTATION に設定して固定運用する。
+
+# --- BNO055 の取り付け向き設定 (test_GPSrun.py と同じ Axis Remap 方式) ------
+# 1 : 正規の向き (0°回転)
+# 2 : Z軸周りに 90°回転
+# 3 : Z軸周りに 180°回転
+# 4 : Z軸周りに 270°回転 (-90°回転)
+# ★実機で 1→2→3→4 の順に試し、Phase4 で目標へ正しく向かって前進する
+#   設定値をここに固定すること。
+BNO_ORIENTATION = 1
+
+def set_bno_orientation(bno: BNO055, orientation: int):
+    """
+    ★追加 (test_GPSrun.py より移植): BNO055 の Axis Remap 機能を使って、
+    センサ内部の基準軸を機体の物理的な取り付け向きに合わせて再配置する。
+    これにより、以降 bno.getMag() 等で得られる値は「機体前方が正しく
+    軸に合った」状態になり、ソフトウェア側で前方オフセットを別途
+    補正する必要がなくなる。
+
+    設定は一度 CONFIG モードへ切り替えてレジスタ (0x41: 軸配置,
+    0x42: 符号) を書き込み、その後 NDOF (フュージョン) モードへ戻す
+    ことで反映される。ドライバの実装差異に対応するため、write_reg /
+    set_mode / write_bytes / 直接 I2C アクセスのいずれかが使える方を
+    試す (test_GPSrun.py と同一のフォールバック構造)。
+    """
+    remap_profiles = {
+        1: (0x24, 0x00),  # P0: 0°  (正規)
+        2: (0x21, 0x04),  # P1: 90°
+        3: (0x24, 0x06),  # P2: 180°
+        4: (0x21, 0x02),  # P3: 270°
+    }
+
+    if orientation not in remap_profiles:
+        log(f"[BNO055][WARN] 無効な BNO_ORIENTATION ({orientation})。デフォルト(1)で動作します。", "WARN")
+        orientation = 1
+
+    config_val, sign_val = remap_profiles[orientation]
+
+    try:
+        if hasattr(bno, 'write_reg'):
+            bno.write_reg(0x3D, 0x00)   # CONFIG モードへ
+        elif hasattr(bno, 'set_mode'):
+            bno.set_mode(BNO055.OPERATION_MODE_CONFIG)
+        time.sleep(0.05)
+
+        if hasattr(bno, 'write_reg'):
+            bno.write_reg(0x41, config_val)
+            bno.write_reg(0x42, sign_val)
+        elif hasattr(bno, 'write_bytes'):
+            bno.write_bytes(0x41, [config_val])
+            bno.write_bytes(0x42, [sign_val])
+        elif hasattr(bno, '_i2c_bus'):
+            bno._i2c_bus.write_byte_data(bno._address, 0x41, config_val)
+            bno._i2c_bus.write_byte_data(bno._address, 0x42, sign_val)
+        time.sleep(0.02)
+
+        if hasattr(bno, 'write_reg'):
+            bno.write_reg(0x3D, 0x0C)   # NDOF (フュージョン) モードへ復帰
+        elif hasattr(bno, 'set_mode'):
+            bno.set_mode(BNO055.OPERATION_MODE_NDOF)
+        time.sleep(0.05)
+
+        degrees_map = {1: "0°(正規)", 2: "90°", 3: "180°", 4: "270°"}
+        log(f"[BNO055] Axis Remap 完了: 設定 {orientation} ({degrees_map[orientation]})")
+
+    except Exception as e:
+        log(f"[BNO055][WARN] Axis Remap 設定時の警告: {e}", "WARN")
+
+
+def calc_azimuth_with_front(mag: list) -> float:
+    """
+    ★変更: 前方オフセット (g_front_offset_deg) の加算は、BNO055 側の
+    Axis Remap (set_bno_orientation, Phase0 で1回設定) に一本化した
+    ため廃止した。この関数は calc_azimuth() へ渡す前に地磁気ベクトルへ
+    EMA (指数移動平均) フィルタを適用する処理のみを担う。
+
+    実機ログ解析により、モータへ高デューティで通電している間、地磁気
+    センサの読み取り値が100ms間隔で数十〜100度以上もジャンプするほどの
+    ノイズ (モータ電流による磁気干渉と推定) が発生し、これが原因で
+    機体方位が暴れて GPS 誘導が発散 (目標から遠ざかる) することが
+    確認された。そのため、まず地磁気ベクトルへ EMA フィルタ (g_mag_ema,
+    MAG_EMA_ALPHA) を適用してノイズを平滑化した上で calc_azimuth() へ渡す。
+    """
+    global g_mag_ema
+    if g_mag_ema is None:
+        g_mag_ema = [float(mag[0]), float(mag[1]), float(mag[2])]
+    else:
+        g_mag_ema[0] = MAG_EMA_ALPHA * mag[0] + (1.0 - MAG_EMA_ALPHA) * g_mag_ema[0]
+        g_mag_ema[1] = MAG_EMA_ALPHA * mag[1] + (1.0 - MAG_EMA_ALPHA) * g_mag_ema[1]
+        g_mag_ema[2] = MAG_EMA_ALPHA * mag[2] + (1.0 - MAG_EMA_ALPHA) * g_mag_ema[2]
+
+    return calc_azimuth(g_mag_ema)
 
 # ===========================================================================
 # フェーズ関数
@@ -807,6 +1096,13 @@ def phase0_init() -> tuple:
     if not bno.setUp(operation_mode=BNO055.OPERATION_MODE_NDOF):
         log("BNO055 初期化失敗", "ERROR")
         sys.exit(1)
+
+    # ★追加: Axis Remap により、機体の物理的な取り付け向きに合わせて
+    #        BNO055 内部の基準軸を再配置する (test_GPSrun.py と同じ方式)。
+    #        これにより以降 bno.getMag() 等で得られる方位は、ソフトウェア
+    #        側で別途オフセットを補正する必要なく、そのまま機体前方基準
+    #        として扱える。
+    set_bno_orientation(bno, BNO_ORIENTATION)
 
     # BMP180
     log("BMP180 初期化中...")
@@ -899,29 +1195,105 @@ def phase1_fall_detection(bno: BNO055, led: LED, start_time: float) -> bool:
         time.sleep(0.05)
 
 
-# ─── Phase 2: 初期後退 (30 秒) → 停止 (5 秒) → 前進 (10 秒) ──────────────────
+# ─── Phase 2: 超音波分離検知後退 → 停止 (5 秒) → 前進 (10 秒) ────────────────
 
-def phase2_initial_backward(motor: MotorController, led: LED, start_time: float):
+def phase2_initial_backward(motor: MotorController, sonar: SonarSensor,
+                            led: LED, start_time: float):
     """
-    サブキャリア脱出のため 30 秒後退し、5 秒停止して切り替えの衝撃・振動を
-    落ち着かせてから (★変更区間)、確実に離脱・前方へ距離を取るために
-    10 秒前進する。
+    サブキャリア脱出のため後退する。
+
+    ★変更: 従来は PHASE2_BACK_SEC (固定30秒) 後退していたが、分離タイミングは
+    機体の落下姿勢や地面との接触状況で毎回変わるため、固定秒数では
+    「まだ分離していないのに後退をやめる」「分離済みなのに無駄に後退を
+    続ける」の両方のリスクがあった。
+
+    そこで前方の超音波センサでサブキャリアとの距離を後退中も継続的に
+    測定し、直前の有効値から PHASE2_SONAR_JUMP_THRESH_M [m] 以上距離が
+    急増した瞬間 (=サブキャリアから機体が実際に分離した瞬間) を検知して、
+    その場で後退を打ち切る。後退開始直後の PHASE2_BACK_MIN_SEC 秒間は
+    センサ値が安定しない可能性があるため判定を保留し (誤検知防止)、
+    超音波が長時間有効値を返さない場合や、分離が検知できないまま
+    PHASE2_BACK_TIMEOUT_SEC を超えた場合は、安全のためタイムアウトとして
+    後退を打ち切る。
+
+    分離検知(またはタイムアウト)後、PHASE2_PAUSE_SEC 秒停止して切り替えの
+    衝撃・振動を落ち着かせ、確実に離脱・前方へ距離を取るために
+    PHASE2_FWD_AFTER_SEC 秒前進する。
     """
     global phase
     phase = 2
     blink_led(led)
     log("─" * 62)
-    log(f"[Phase2] 初期後退 {PHASE2_BACK_SEC:.0f} 秒")
+    log(f"[Phase2] 超音波分離検知後退を開始します")
+    log(f"  判定: 直前値から {PHASE2_SONAR_JUMP_THRESH_M:.2f} m 以上の距離急増で分離とみなす "
+        f"(判定開始まで {PHASE2_BACK_MIN_SEC:.0f} s のウォームアップ)")
+    log(f"  安全タイムアウト: {PHASE2_BACK_TIMEOUT_SEC:.0f} s")
     log_data_status("Phase2開始時点")
+
     motor.backward()
-    deadline = time.time() + PHASE2_BACK_SEC
-    while time.time() < deadline:
-        remaining = deadline - time.time()
-        log(f"  後退中... 残り {remaining:.1f} s")
-        log_sensor_row(time.time() - start_time, "BACKWARD_PHASE2")
-        time.sleep(1.0)
+    p2_start = time.time()
+    prev_valid_dist = None      # 直前の有効な超音波距離 [m]
+    last_sonar_valid_time = p2_start
+    separated = False
+    timed_out = False
+
+    print(f"\n{'経過[s]':>8}  {'Sonar[m]':>9}  {'直前値[m]':>10}  {'差分[m]':>8}  {'判定':>10}")
+    print("-" * 55)
+
+    while True:
+        now = time.time()
+        elapsed = now - p2_start
+
+        dist = sonar.get_distance_m()
+        dist_str = f"{dist:.3f}" if dist is not None else "---"
+
+        judge = "計測中"
+        if dist is not None:
+            last_sonar_valid_time = now
+            if elapsed < PHASE2_BACK_MIN_SEC:
+                judge = "ウォームアップ中"
+            elif prev_valid_dist is not None:
+                jump = dist - prev_valid_dist
+                if jump >= PHASE2_SONAR_JUMP_THRESH_M:
+                    judge = "分離検知!"
+                    log(f"[Phase2] 超音波距離が急増 ({prev_valid_dist:.3f}m → {dist:.3f}m, "
+                        f"差分={jump:+.3f}m) → サブキャリアから分離したと判定します")
+                    separated = True
+                else:
+                    judge = "後退中"
+            prev_valid_dist = dist
+        else:
+            judge = "センサ無効"
+            if now - last_sonar_valid_time >= PHASE2_SONAR_LOST_TIMEOUT_SEC:
+                log(f"[Phase2][WARN] 超音波センサが {PHASE2_SONAR_LOST_TIMEOUT_SEC:.0f}s "
+                    f"以上有効値を返していません。タイムアウト判定のみで後退を継続します。", "WARN")
+                last_sonar_valid_time = now  # 再警告を連発しないよう基準を更新
+
+        diff_str = (f"{dist - prev_valid_dist:+.3f}"
+                    if (dist is not None and prev_valid_dist is not None and dist != prev_valid_dist)
+                    else "--")
+        print(f"{elapsed:>8.2f}  {dist_str:>9}  "
+              f"{(f'{prev_valid_dist:.3f}' if prev_valid_dist is not None else '---'):>10}  "
+              f"{diff_str:>8}  {judge:>10}", flush=True)
+        log_sensor_row(time.time() - start_time, "BACKWARD_PHASE2",
+                       f"sonar={dist_str} judge={judge}")
+
+        if separated:
+            break
+
+        if elapsed > PHASE2_BACK_TIMEOUT_SEC:
+            log(f"[Phase2][WARN] 分離を検知できないまま {PHASE2_BACK_TIMEOUT_SEC:.0f}s "
+                f"のタイムアウトに達しました。後退を打ち切ります。", "WARN")
+            timed_out = True
+            break
+
+        time.sleep(PHASE2_LOOP_DT)
+
     motor.stop()
-    log("[Phase2] 後退完了 → 停止")
+    if separated:
+        log(f"[Phase2] 後退完了 → 停止 (超音波による分離検知, 所要 {elapsed:.1f} s)")
+    elif timed_out:
+        log(f"[Phase2] 後退完了 → 停止 (タイムアウト強制終了, 所要 {elapsed:.1f} s)", "WARN")
 
     # ── ★変更: 後退と前進の間に 5 秒間の停止を挟む ──
     log(f"[Phase2] 停止 {PHASE2_PAUSE_SEC:.0f} 秒 (後退→前進の切り替え待ち)")
@@ -1183,6 +1555,8 @@ def phase3_calibration(bno: BNO055, motor: MotorController, led: LED, start_time
     return baseline_horiz_acc
 
 
+
+
 # ─── Phase 4: GPS 誘導走行 + スタック検知・回避 ──────────────────────────────
 
 def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
@@ -1192,6 +1566,12 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
     GPS 誘導走行。目標まで PHASE4_TO_5_RADIUS 以内に入ったら Phase4 を終了し、
     戻り値 "NEAR_GOAL" を返して Phase5 (超音波による最終接近) へ引き継ぐ。
     タイムアウト時は "TIMEOUT"、中断時は "ABORT" を返す。
+
+    ★変更: 機体の物理的な前方とセンサ方位のズレは、Phase0 で一度だけ
+    実行する BNO055 の Axis Remap (set_bno_orientation, BNO_ORIENTATION)
+    で補正済みであるため、Phase4 側で前方候補を探索する処理は行わない。
+    方位計算は全て calc_azimuth_with_front() (EMA平滑化済みの地磁気から
+    計算した方位) を使用する。
     """
     global phase, g_acc, g_mag, g_gyro, g_calib, g_sonar_m
 
@@ -1200,15 +1580,25 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
     log("─" * 62)
     log(f"[Phase4] GPS 誘導走行開始")
     log(f"  目標: ({TARGET_LAT}, {TARGET_LNG})  Phase5移行半径: {PHASE4_TO_5_RADIUS} m")
+    log(f"  BNO055 Axis Remap 設定: BNO_ORIENTATION={BNO_ORIENTATION} (Phase0 で適用済み)")
     log(f"  スタック閾値(★厳格化): 前進中の水平加速度 < {STUCK_HORIZON_ACCEL_THRESH} m/s² "
         f"かつ GPS速度 < {STUCK_GPS_SPEED_THRESH_MPS} m/s  or 超音波 < {STUCK_SONAR_DIST_THRESH} m")
     log(f"  スタック確定: {STUCK_COUNT_THRESHOLD} 回連続 ({STUCK_COUNT_THRESHOLD * LOOP_DT:.1f} s)")
     log_data_status("Phase4開始時点")
 
-    # ★追加: このフェーズだけモータの forward/backward (IN/OUT) を一時的に反転
-    if PHASE4_MOTOR_REVERSED:
-        log("[Phase4] ★今だけモータのIN/OUTを反転させます (PHASE4_MOTOR_REVERSED=True)")
+    # ★変更: このフェーズだけモータの forward/backward (IN/OUT) を一時的に反転
+    #        (PHASE4_MOTOR_REVERSED の値に応じて反転有無をログ表示)
+    reversed_state = "反転" if PHASE4_MOTOR_REVERSED else "通常(反転なし)"
+    log(f"[Phase4] ★モータのIN/OUTを{reversed_state}に設定します "
+        f"(PHASE4_MOTOR_REVERSED={PHASE4_MOTOR_REVERSED})")
     motor.set_reversed(PHASE4_MOTOR_REVERSED)
+
+    # ★追加: Phase4 (誘導走行・スタック回復) では、いかなる場合も
+    #        モータを後退方向へ回転させてはならない。backward() が万一
+    #        呼ばれても物理的に後退しないよう、ここで安全ロックを有効化する。
+    motor.set_forward_only(True)
+    log("[Phase4] ★安全ロック: 後退禁止モードを有効化しました "
+        "(以降、backward()を呼んでも実際には後退しません)")
 
     # コンソールヘッダー (横 1 行ログ)
     HDR = (f"{'T[s]':>7}  {'Lat':>11}  {'Lng':>12}  "
@@ -1235,7 +1625,7 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
 
     def rotate_until_degrees(direction: str, target_deg: float, note_prefix: str) -> float:
         """
-        地磁気(9軸)から算出した方位 (calc_azimuth) の変化量を積算し、
+        機体前方基準の方位 (calc_azimuth_with_front) の変化量を積算し、
         指定方向へ target_deg 度回転するまで強旋回を続ける。
         メインループが継続的に更新しているグローバル g_mag を参照するだけで
         自らは BNO055 に触れない (メインループとの I2C 同時アクセスを回避するため)。
@@ -1251,7 +1641,7 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
             note = f"{note_prefix}_R"
 
         t_start   = time.time()
-        prev_az   = calc_azimuth(g_mag)
+        prev_az   = calc_azimuth_with_front(g_mag)
         cumulative = 0.0
         while True:
             now = time.time()
@@ -1259,7 +1649,7 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
                 log(f"[Phase4][STUCK] {note}: 回転タイムアウト "
                     f"({STUCK_RECOVER_TURN_TIMEOUT_SEC:.0f}s, 約{cumulative:.1f}度で打ち切り)", "WARN")
                 break
-            cur_az = calc_azimuth(g_mag)
+            cur_az = calc_azimuth_with_front(g_mag)
             delta  = calc_direction_diff(cur_az, prev_az)
             cumulative += delta
             prev_az = cur_az
@@ -1383,8 +1773,8 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
             g_sonar_m = sonar.get_distance_m()
             sonar_str = f"{g_sonar_m:.3f}" if g_sonar_m is not None else "---"
 
-            # ── 航法計算 ──
-            azimuth        = calc_azimuth(g_mag)
+            # ── 航法計算 (★変更: calc_azimuth → calc_azimuth_with_front) ──
+            azimuth        = calc_azimuth_with_front(g_mag)
             lat, lng       = g_gps_lat, g_gps_lng
             distance       = calc_distance(lat, lng)
             target_bearing = calc_target_bearing(lat, lng)
@@ -1394,13 +1784,14 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
             horiz_acc = math.sqrt(g_acc[0]**2 + g_acc[1]**2)
 
             # ── ★追加: 目標までの距離・方位ずれのまとめ表示 ──
-            # 9軸センサ(地磁気)から算出した機体方位と目標方位のずれ (diff) を
-            # NAV_REPORT_INTERVAL_SEC ごとにログへはっきり表示する。
+            # 9軸センサ(地磁気, 前方補正済み)から算出した機体方位と目標方位の
+            # ずれ (diff) を NAV_REPORT_INTERVAL_SEC ごとにログへはっきり表示する。
             if loop_start - last_nav_report_time >= NAV_REPORT_INTERVAL_SEC:
                 last_nav_report_time = loop_start
                 turn_side = "右" if diff < 0 else ("左" if diff > 0 else "正面")
                 log(f"[Phase4] 目標までの距離={distance:.2f} m  "
-                    f"機体方位={azimuth:.1f}°  目標方位={target_bearing:.1f}°  "
+                    f"機体方位={azimuth:.1f}° (Axis Remap:{BNO_ORIENTATION})  "
+                    f"目標方位={target_bearing:.1f}°  "
                     f"ずれ={diff:+.1f}° ({turn_side})")
                 log_data_status("GPS誘導走行演算 (航法計算+スタック判定)")
 
@@ -1486,6 +1877,9 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
         motor.stop()
         # ★追加: Phase4限定の反転を元に戻す (Phase5などに影響させないため)
         motor.set_reversed(False)
+        # ★追加: Phase4限定の後退禁止ロックを解除 (Phase5などに影響させないため)
+        motor.set_forward_only(False)
+        log("[Phase4] 安全ロック: 後退禁止モードを解除しました")
         print()
         log("─" * 62)
         if near_goal:
@@ -1504,7 +1898,7 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
         return "ABORT"
 
 
-# ─── Phase 5: 超音波センサによる最終接近 (★追加) ─────────────────────────────
+# ─── Phase 5: 超音波センサによる最終接近 (★変更: 左右スキャン方式) ───────────
 
 def phase5_final_approach(sonar: SonarSensor, motor: MotorController,
                           led: LED, start_time: float) -> bool:
@@ -1513,15 +1907,35 @@ def phase5_final_approach(sonar: SonarSensor, motor: MotorController,
 
     GPS はこれ以上の精度で距離を詰められないため、前方の超音波センサで
     ゴールに設置された物体との距離を直接測りながら近づく。
-    「機体を左右に0.1秒ずつ振る」動作は turn_left_weak / turn_right_weak
-    (両輪とも前進しつつ片側だけ弱めることで、旋回というより蛇行しながら
-    前進する動き) を FINAL_WIGGLE_SEC 秒ごとに交互に切り替えることで実現し、
-    前方の探索範囲を左右に振りながら前進を続ける。
 
-    前方オブジェクトとの距離が FINAL_STOP_DIST_M (0.05 m) 以下になったら
-    「ゴールに0距離まで到達」とみなして停止・終了する。
+    ★変更: 従来は超音波の値を判断に使わず、turn_left_weak/turn_right_weak
+    を機械的に交互切り替えするだけの蛇行だったが、これを「超音波センサの
+    値に基づいて能動的に対象物へ向かう」方式に変更した。1サイクルは
+    以下の手順で構成される:
+
+      1. turn_left_strong() で FINAL_SCAN_SEC 秒間左へ旋回しながら、
+         その間に得られた超音波距離の最小値を dist_left として記録する
+         (指向性のあるセンサが対象物に近い方向を向いたときほど、
+          距離が短く読めるという前提)。
+      2. turn_right_strong() で FINAL_SCAN_SEC 秒間右へ旋回しながら、
+         同様に dist_right を記録する (これで一旦、旋回前の向きに近い
+         状態へ戻ることになる)。
+      3. dist_left と dist_right を比較し、より近かった方向 (対象物が
+         その方向にある可能性が高い) へ turn_left_weak / turn_right_weak
+         (両輪前進しつつ片側だけ弱める動き) で FINAL_SCAN_SEC 秒間だけ
+         向き直しながら前進する。どちらも無効値ならとりあえず forward()
+         で前進する。
+      4. 1 に戻って繰り返す。
+
+    スキャン中および接近中、いずれかの時点で超音波距離が
+    FINAL_STOP_DIST_M (0.05 m) 以下になったら「ゴールに0距離まで到達」
+    とみなして即座に停止・終了する。
     安全のため FINAL_APPROACH_TIMEOUT_SEC で強制終了し、超音波が長時間
     有効値を返さない場合は警告を出す。
+
+    ※ BNO055 の Axis Remap (Phase0 で設定済み) による前方補正は、
+       ログ表示用の参考ナビ情報 (calc_azimuth_with_front) にも自動的に
+       反映される。
 
     戻り値: True = 目標到達, False = タイムアウト/中断
     """
@@ -1529,18 +1943,18 @@ def phase5_final_approach(sonar: SonarSensor, motor: MotorController,
     phase = 5
     blink_led(led)
     log("─" * 62)
-    log("[Phase5] 超音波センサによる最終接近を開始します")
+    log("[Phase5] 超音波センサによる左右スキャン接近を開始します")
     log(f"  停止距離: {FINAL_STOP_DIST_M:.2f} m 以下で到達  "
-        f"振り幅: 左右 {FINAL_WIGGLE_SEC:.1f} s ずつ  "
+        f"スキャン: 左右それぞれ {FINAL_SCAN_SEC:.1f} s  "
         f"タイムアウト: {FINAL_APPROACH_TIMEOUT_SEC:.0f} s")
     log_data_status("Phase5開始時点")
 
     HDR = (f"{'T[s]':>7}  {'Lat':>11}  {'Lng':>12}  "
            f"{'Dist[m]':>8}  {'Bear[°]':>7}  {'Az[°]':>6}  "
-           f"{'Diff[°]':>7}  {'Sonar[m]':>9}  {'Motor':>16}")
+           f"{'Diff[°]':>7}  {'SonL[m]':>8}  {'SonR[m]':>8}  {'Motor':>16}")
     DAT = (f"{{:>7.2f}}  {{:>11.6f}}  {{:>12.6f}}  "
            f"{{:>8.2f}}  {{:>7.2f}}  {{:>6.2f}}  "
-           f"{{:>7.2f}}  {{:>9}}  {{:>16}}")
+           f"{{:>7.2f}}  {{:>8}}  {{:>8}}  {{:>16}}")
     print()
     print("-" * len(HDR))
     print(HDR)
@@ -1551,7 +1965,47 @@ def phase5_final_approach(sonar: SonarSensor, motor: MotorController,
     last_sonar_valid_time = p5_start
     reached  = False
     timed_out = False
-    wiggle_dir = "L"   # 次に振る方向
+
+    def check_reached(dist) -> bool:
+        """★追加: 距離が FINAL_STOP_DIST_M 以下なら到達とみなす共通判定。"""
+        return dist is not None and dist <= FINAL_STOP_DIST_M
+
+    def scan_direction(direction: str, note_prefix: str):
+        """
+        ★追加: 指定方向へ FINAL_SCAN_SEC 秒間強旋回しながら超音波を
+        サンプリングし、その間に得られた最小距離を返す。
+        途中で到達判定を満たした場合は即座に停止して "REACHED" を返す
+        (呼び出し元はこれを見て全体を打ち切る)。
+        戻り値: (最小距離 or None, 到達したか True/False)
+        """
+        nonlocal last_sonar_valid_time
+        global g_sonar_m
+        if direction == "L":
+            motor.turn_left_strong()
+            motor_cmd = f"{note_prefix}_SCAN_L"
+        else:
+            motor.turn_right_strong()
+            motor_cmd = f"{note_prefix}_SCAN_R"
+
+        best = None
+        t_end = time.time() + FINAL_SCAN_SEC
+        while time.time() < t_end:
+            g_sonar_m = sonar.get_distance_m()
+            now = time.time()
+            if g_sonar_m is not None:
+                last_sonar_valid_time = now
+                if best is None or g_sonar_m < best:
+                    best = g_sonar_m
+            log_sensor_row(now - start_time, motor_cmd,
+                           f"best={best if best is not None else '---'}")
+            if check_reached(g_sonar_m):
+                motor.stop()
+                log(f"[Phase5] スキャン中に目標到達！ ({direction}方向, "
+                    f"前方オブジェクトまで {g_sonar_m:.3f} m)")
+                return best, True
+            time.sleep(FINAL_SCAN_LOOP_DT)
+
+        return best, False
 
     try:
         while True:
@@ -1563,58 +2017,78 @@ def phase5_final_approach(sonar: SonarSensor, motor: MotorController,
                 timed_out = True
                 break
 
-            # ── 超音波センサ取得 (最終接近の主判定) ──
-            g_sonar_m = sonar.get_distance_m()
-            sonar_str = f"{g_sonar_m:.3f}" if g_sonar_m is not None else "---"
-
-            if g_sonar_m is not None:
-                last_sonar_valid_time = now
-            elif now - last_sonar_valid_time >= FINAL_SONAR_LOST_WARN_SEC:
+            if now - last_sonar_valid_time >= FINAL_SONAR_LOST_WARN_SEC:
                 log(f"[Phase5][WARN] 超音波センサが {FINAL_SONAR_LOST_WARN_SEC:.0f}s "
                     f"以上有効値を返していません。前方に物体が無いか、センサ不調の可能性があります。", "WARN")
                 last_sonar_valid_time = now  # 再警告を連発しないよう基準を更新
 
+            # ── 1. 左スキャン ──
+            dist_left, hit = scan_direction("L", "P5")
+            if hit:
+                reached = True
+                break
+
+            # ── 2. 右スキャン ──
+            dist_right, hit = scan_direction("R", "P5")
+            if hit:
+                reached = True
+                break
+
+            # ── 3. 近かった方向を判定し、その方向へ向き直しながら前進 ──
+            if dist_left is not None and (dist_right is None or dist_left <= dist_right):
+                favored, favored_str = "L", f"{dist_left:.3f}"
+                motor.turn_left_weak()
+                motor_cmd = "APPROACH_L"
+            elif dist_right is not None:
+                favored, favored_str = "R", f"{dist_right:.3f}"
+                motor.turn_right_weak()
+                motor_cmd = "APPROACH_R"
+            else:
+                favored, favored_str = "-", "---"
+                motor.forward()
+                motor_cmd = "APPROACH_FWD"
+
+            t_end = time.time() + FINAL_SCAN_SEC
+            while time.time() < t_end:
+                g_sonar_m = sonar.get_distance_m()
+                tnow = time.time()
+                if g_sonar_m is not None:
+                    last_sonar_valid_time = tnow
+                log_sensor_row(tnow - start_time, motor_cmd,
+                               f"favored={favored}")
+                if check_reached(g_sonar_m):
+                    motor.stop()
+                    log(f"[Phase5] 接近中に目標到達！ 前方オブジェクトまで "
+                        f"{g_sonar_m:.3f} m")
+                    reached = True
+                    break
+                time.sleep(FINAL_SCAN_LOOP_DT)
+            if reached:
+                break
+
             # ── 参考表示用の GPS/地磁気ナビ情報 (最終判定には使わない) ──
             lat, lng       = g_gps_lat, g_gps_lng
             distance       = calc_distance(lat, lng)
-            azimuth        = calc_azimuth(g_mag)
+            azimuth        = calc_azimuth_with_front(g_mag)
             target_bearing = calc_target_bearing(lat, lng)
             diff           = calc_direction_diff(azimuth, target_bearing)
+
+            sonl_str = f"{dist_left:.3f}" if dist_left is not None else "---"
+            sonr_str = f"{dist_right:.3f}" if dist_right is not None else "---"
+            row = DAT.format(elapsed, lat, lng, distance, target_bearing,
+                             azimuth, diff, sonl_str, sonr_str,
+                             f"{motor_cmd}(→{favored}:{favored_str})")
+            print(row, flush=True)
 
             if now - last_nav_report_time >= FINAL_NAV_REPORT_INTERVAL_SEC:
                 last_nav_report_time = now
                 turn_side = "右" if diff < 0 else ("左" if diff > 0 else "正面")
                 log(f"[Phase5] 目標までの距離(GPS)={distance:.2f} m  "
-                    f"前方オブジェクトまで={sonar_str} m  "
+                    f"左スキャン距離={sonl_str} m  右スキャン距離={sonr_str} m  "
+                    f"→ {favored}方向へ接近  "
                     f"機体方位={azimuth:.1f}°  目標方位={target_bearing:.1f}°  "
                     f"ずれ={diff:+.1f}° ({turn_side})")
-                log_data_status("最終接近演算 (超音波距離を主判定に使用)")
-
-            # ── 到達判定: 前方オブジェクトとの距離が FINAL_STOP_DIST_M 以下 ──
-            if g_sonar_m is not None and g_sonar_m <= FINAL_STOP_DIST_M:
-                motor.stop()
-                log(f"[Phase5] 目標到達！ 前方オブジェクトまで {g_sonar_m:.3f} m "
-                    f"(距離0到達とみなします)")
-                reached = True
-                break
-
-            # ── 左右に0.1秒ずつ振りながら前進 (蛇行接近) ──
-            if wiggle_dir == "L":
-                motor.turn_left_weak()
-                motor_cmd = "WIGGLE_L"
-                wiggle_dir = "R"
-            else:
-                motor.turn_right_weak()
-                motor_cmd = "WIGGLE_R"
-                wiggle_dir = "L"
-
-            row = DAT.format(elapsed, lat, lng, distance, target_bearing,
-                             azimuth, diff, sonar_str, motor_cmd)
-            print(row, flush=True)
-            log_sensor_row(time.time() - start_time, motor_cmd,
-                           f"sonar={sonar_str}")
-
-            time.sleep(FINAL_WIGGLE_SEC)
+                log_data_status("最終接近演算 (左右スキャン超音波距離を主判定に使用)")
 
     except KeyboardInterrupt:
         log("[Phase5] Ctrl+C 受信 → 緊急停止")
@@ -1651,12 +2125,12 @@ def main():
             log("タイムアウトのため強制移行します。", "WARN")
 
         # Phase 2: 初期後退 (30 s) → 停止 (5 s) → 前進 (10 s)
-        phase2_initial_backward(motor, led, start_time)
+        phase2_initial_backward(motor, sonar, led, start_time)
 
         # Phase 3: キャリブレーション (静止⇔スピン サイクル) & GPS 安定化
         baseline_horiz_acc = phase3_calibration(bno, motor, led, start_time)
 
-        # Phase 4: GPS 誘導走行 + スタック検知
+        # Phase 4: GPS 誘導走行 + スタック検知 (前方はPhase0のAxis Remapで補正済み)
         phase4_result = phase4_guided_run(bno, sonar, motor, led, start_time, baseline_horiz_acc)
 
         # Phase 5: 目標付近 (PHASE4_TO_5_RADIUS 以内) まで来たら超音波で最終接近

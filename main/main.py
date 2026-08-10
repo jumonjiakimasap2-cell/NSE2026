@@ -931,6 +931,7 @@ def calc_azimuth(mag: list) -> float:
     """
     az = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
     az += MAG_DECLINATION
+    az *= -1
     return az % 360.0
 
 def calc_direction_diff(azimuth: float, bearing: float) -> float:

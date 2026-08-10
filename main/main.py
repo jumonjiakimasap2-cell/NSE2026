@@ -916,23 +916,13 @@ def calc_target_bearing(lat, lng) -> float:
 
 def calc_azimuth(mag: list) -> float:
     """
-    生の地磁気ベクトルから磁北基準の方位角 [度, 北=0, 東=90, 南=180, 西=270,
-    時計回り] を計算する。
-
-    ★修正 (重大バグ): 従来はここで `az *= -1` という符号反転を行っていたが、
-    直前の `90.0 - atan2(mag[1], mag[0])` の時点で既に「北=0°,東=90°,
-    南=180°,西=270°」の時計回り方位になっている (calc_target_bearing() の
-    `90 - atan2(dy,dx)` と全く同じ変換パターン) ため、そこへさらに符号
-    反転をかけると東西が鏡写しになってしまう。例えば目標が実際には東に
-    あるのに「西にある」と誤認識し、機体は逆方向へ旋回し続けて
-    永久に正しい向きへ復帰できないという重大な不具合だった。
-    test_GPSrun.py 側にも同一のバグがあることを確認したため、
-    このファイルでは az *= -1 の行を削除して修正する。
+    生の地磁気ベクトル (X=右, Y=前) から正確な方位角 [度, 0〜360, 時計回り] を計算
     """
-    az = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
+    # atan2(-X, Y) により、北=0°, 東=90°, 南=180°, 西=270° が正しく得られます
+    az = math.degrees(math.atan2(-mag[0], mag[1]))
     az += MAG_DECLINATION
-    az *= -1
     return az % 360.0
+
 
 def calc_direction_diff(azimuth: float, bearing: float) -> float:
     diff = (azimuth - bearing) % 360.0

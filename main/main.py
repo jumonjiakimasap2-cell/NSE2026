@@ -69,15 +69,18 @@ NSE2026/main/main.py
                 backward() が万一 (バグ・将来の改修等で) 呼ばれても、
                 MotorController 側で物理的に後退させず停止のみ行う
                 (Phase4終了時にロックは解除され、以降のフェーズには影響しない)。
-                【改良/修正】方位計算式に東西が反転する重大なバグ
-                (az *= -1) があったため削除して修正した。また、以前は
-                Phase4 開始時に「前方候補を実際に前進走行させて GPS 距離の
-                変化から探索する」方式だったが、候補を切り替えても機体を
-                実際に回転させずに毎回同じ方向へ直進していたため、
-                前方候補を正しく判別できない欠陥があった。この方式を廃止し、
-                BNO055 の Axis Remap 機能 (BNO_ORIENTATION, Phase0で1回設定)
-                でセンサ内部の基準軸を機体の物理的な取り付け向きに合わせて
-                再配置する、より確実で単純な方式に変更した。
+                【改良/修正】方位計算式は test_GPSrun.py と同じ単純な
+                固定式 (calc_azimuth) に統一した。以前は「モータ反転
+                フラグ (PHASE4_MOTOR_REVERSED)」「方位鏡写しフラグ
+                (AZIMUTH_MIRROR_FIX)」など複数の反転系フラグを個別に
+                導入していたが、フラグの組み合わせが増えるほど機体の
+                動きが把握しづらくなる混乱を招いたため、これらを全て
+                撤去し、モータは常に素直に forward=前進/backward=後退、
+                方位計算も固定の単純な式で計算するフラットな設計に戻した。
+                取り付け向きの補正は BNO055 の Axis Remap 機能
+                (BNO_ORIENTATION, Phase0で1回設定) だけに一本化し、
+                センサ内部の基準軸を機体の物理的な取り付け向きに合わせて
+                再配置する、確実で単純な方式のみを採用する。
                 スタック検知 (超音波 + 水平加速度 + GPS速度) で障害物を回避する。
                 【改良】実運用でスタックしていないのに誤検知する事例があった
                 ため、判定を厳格化した: 水平加速度による判定は「前進」を
@@ -440,15 +443,14 @@ RAMP_UPDATE_INTERVAL_SEC = 0.2  # [s] バックグラウンドでデューティ
 # 弱旋回側 (turn_left_weak / turn_right_weak) の出力は、従来
 # MOTOR_SPEED(0.8) に対して SPEED_WEAK(0.4) = 50% の比率だった。
 # ソフトスタートを導入した後も同じ比率を保つよう、強旋回側の
-# 現在のデューティ比に対する倍率 (WEAK_RATIO) として定義しておく。
 SPEED_WEAK  = 0.4                          # [-] 従来の弱旋回側 duty (比率計算の元値として保持)
 WEAK_RATIO  = SPEED_WEAK / RAMP_START_DUTY  # [-] 強旋回側に対する弱旋回側の出力比率 (デフォルト 0.5)
 
-# ★変更: 誘導走行フェーズ (Phase4) だけモータの IN/OUT (forward/backward) を
-#        一時的に反転させるフラグ。配線都合等で forward 指示が実際には
-#        後退になってしまう場合の暫定対応。Phase2/Phase3/Phase5 には影響しない。
-#        ★実地確認により、従来の反転設定 (True) は逆だったため False へ変更。
-PHASE4_MOTOR_REVERSED = False
+# ★削除: PHASE4_MOTOR_REVERSED (Phase4限定のモータ反転フラグ) は撤去した。
+#        フラグを増やして個別補正しようとすると、フラグ同士の組み合わせで
+#        逆に機体の動きが把握しづらくなる。モータは常に素直に forward=前進 /
+#        backward=後退として動作し、取り付け向きの補正は BNO055 の
+#        Axis Remap (BNO_ORIENTATION) だけに一本化する。
 
 # モータピン (BCM) ← test_run.py / test_avoid.py と統一
 PIN_PWMA = 13
@@ -669,11 +671,10 @@ class MotorController:
         self._mot_a  = Motor(forward=PIN_AIN1, backward=PIN_AIN2)   # 右
         self._mot_b  = Motor(forward=PIN_BIN1, backward=PIN_BIN2)   # 左
         self._stby   = OutputDevice(PIN_STBY)
-        # ★追加: モータドライバの IN/OUT (forward/backward) を一時的に
-        #        反転させるためのフラグ。配線や個体差で forward 指示が
-        #        実際には後退になってしまう場合の暫定対応として、
-        #        set_reversed() で特定フェーズだけ有効化することを想定。
-        self._reversed = False
+        # ★削除: モータの forward/backward を丸ごと反転させる _reversed
+        #        フラグは撤去した。モータは常に素直に forward=前進 /
+        #        backward=後退として動作する (test_GPSrun.py と同じ、
+        #        余計な補正を挟まないシンプルな設計)。
 
         # ★追加: 後退方向への回転を絶対に禁止する安全ロック。
         #        True の間は backward() が呼ばれても実際には後退させず、
@@ -704,16 +705,6 @@ class MotorController:
         log(f"[Motor] ソフトスタート設定: {RAMP_START_DUTY*100:.0f}% → {RAMP_END_DUTY*100:.0f}% "
             f"を {RAMP_DURATION_SEC:.1f} 秒かけて引き上げ (更新周期 {RAMP_UPDATE_INTERVAL_SEC:.2f}s)")
 
-    def set_reversed(self, reversed_: bool):
-        """
-        ★追加: モータの forward/backward (IN/OUT) をこの呼び出し以降
-        一時的に反転させる (True) / 通常に戻す (False)。
-        forward/backward/turn_* 系メソッドすべてに一貫して反映される。
-        """
-        state = "反転" if reversed_ else "通常"
-        log(f"モータ方向を{state}モードに設定 (reversed={reversed_})")
-        self._reversed = reversed_
-
     def set_forward_only(self, enabled: bool):
         """
         ★追加: 後退方向への回転を絶対に禁止する安全ロックを有効/無効にする。
@@ -727,19 +718,6 @@ class MotorController:
         state = "有効(backward()は無効化)" if enabled else "無効(通常通り)"
         log(f"[Motor] 後退禁止モードを{state}に設定")
         self._forward_only = enabled
-
-    # ── 反転フラグを考慮した低レベルヘルパー ──
-    def _a_fwd(self):
-        (self._mot_a.backward if self._reversed else self._mot_a.forward)()
-
-    def _a_back(self):
-        (self._mot_a.forward if self._reversed else self._mot_a.backward)()
-
-    def _b_fwd(self):
-        (self._mot_b.backward if self._reversed else self._mot_b.forward)()
-
-    def _b_back(self):
-        (self._mot_b.forward if self._reversed else self._mot_b.backward)()
 
     # ── ★追加: ソフトスタート (デューティ比 段階的引き上げ) ──────────────
     def _ramp_loop(self):
@@ -799,8 +777,8 @@ class MotorController:
 
     def forward(self):
         self._start_move(1.0, 1.0)
-        self._a_fwd()
-        self._b_fwd()
+        self._mot_a.forward()
+        self._mot_b.forward()
 
     def backward(self):
         # ★追加: 後退禁止ロック中は、実際には後退させず安全に停止するだけ。
@@ -813,8 +791,8 @@ class MotorController:
             self.stop()
             return
         self._start_move(1.0, 1.0)
-        self._a_back()
-        self._b_back()
+        self._mot_a.backward()
+        self._mot_b.backward()
 
     def stop(self):
         with self._ramp_lock:
@@ -831,24 +809,24 @@ class MotorController:
     def turn_left_strong(self):
         """右モータ前進 / 左モータ停止 → 左旋回"""
         self._start_move(1.0, 0.0)
-        self._a_fwd()
+        self._mot_a.forward()
         self._mot_b.stop()
 
     def turn_right_strong(self):
         """右モータ停止 / 左モータ前進 → 右旋回"""
         self._start_move(0.0, 1.0)
         self._mot_a.stop()
-        self._b_fwd()
+        self._mot_b.forward()
 
     def turn_left_weak(self):
         self._start_move(1.0, WEAK_RATIO)
-        self._a_fwd()
-        self._b_fwd()
+        self._mot_a.forward()
+        self._mot_b.forward()
 
     def turn_right_weak(self):
         self._start_move(WEAK_RATIO, 1.0)
-        self._a_fwd()
-        self._b_fwd()
+        self._mot_a.forward()
+        self._mot_b.forward()
 
     def apply_diff(self, diff: float) -> str:
         """
@@ -920,29 +898,17 @@ def calc_azimuth(mag: list) -> float:
     生の地磁気ベクトルから磁北基準の方位角 [度, 北=0, 東=90, 南=180, 西=270,
     時計回り] を計算する。
 
-    ★重要: `90.0 - atan2(mag[1], mag[0])` の時点で「北=0°,東=90°,
-    南=180°,西=270°」の時計回り方位になるという理論上の想定に基づき、
-    以前はここでさらに `az *= -1` を行っていた行を「鏡写しバグ」として
-    削除したが、実機で全ての BNO_ORIENTATION (1〜4) を試しても常に
-    反対方向へ進むという症状が報告された。
-
-    BNO_ORIENTATION による Axis Remap は Z軸回りの「回転」しか補正でき
-    ないため、もし実際に地磁気センサのX/Y軸の解釈が理論上の想定と
-    鏡写し (東西反転) の関係にある場合、回転をどれだけ試しても絶対に
-    補正できない。「どの向きを試しても反対方向」という症状は、まさに
-    回転(BNO_ORIENTATION)では補正不可能な鏡写し型のズレが残っている
-    ことを強く示唆する。
-
-    そこで、この鏡写し補正を AZIMUTH_MIRROR_FIX という独立したフラグに
-    切り出した。BNO_ORIENTATION (回転: 4通り) × AZIMUTH_MIRROR_FIX
-    (鏡写し: 2通り) の組み合わせで合計8通りとなり、実際に有り得る
-    センサ取り付け・軸解釈の全パターンを尽くせるようにしている。
+    ★変更: 反転系のフラグ (AZIMUTH_MIRROR_FIX) を廃止し、test_GPSrun.py と
+    全く同じ「素の」計算式に統一した。フラグを増やして条件分岐で
+    細かく補正しようとすると、フラグ同士の組み合わせが増えて逆に
+    機体の動きが把握しづらくなる (今回発生した混乱の原因)。取り付け
+    向きの補正は BNO_ORIENTATION (Axis Remap, Phase0で1回設定) だけに
+    一本化し、方位計算式自体は常に固定・単純に保つ。
     """
-    az = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
-    if AZIMUTH_MIRROR_FIX:
-        az = -az
-    az += MAG_DECLINATION
-    return az % 360.0
+    azimuth = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
+    azimuth *= -1
+    azimuth += MAG_DECLINATION
+    return azimuth % 360.0
 
 def calc_direction_diff(azimuth: float, bearing: float) -> float:
     diff = (azimuth - bearing) % 360.0
@@ -984,19 +950,6 @@ def calc_direction_diff(azimuth: float, bearing: float) -> float:
 # ★実機で 1→2→3→4 の順に試し、Phase4 で目標へ正しく向かって前進する
 #   設定値をここに固定すること。
 BNO_ORIENTATION = 1
-
-# --- 地磁気の鏡写し(東西反転)補正 (★追加) -----------------------------------
-# BNO_ORIENTATION (Z軸回りの回転) をどれに設定しても機体が反対方向へ
-# 進んでしまう場合、それは回転では補正できない「鏡写し(東西反転)型」の
-# ズレが残っている可能性が高い。True にすると calc_azimuth() 内で
-# 方位角の符号を反転させる (東西を鏡写しにする)。
-# BNO_ORIENTATION (4通り) × AZIMUTH_MIRROR_FIX (2通り) = 8通りの組み合わせを
-# 順に試すことで、実機のセンサ取り付け・軸配置がどのパターンであっても
-# 正しい方位が得られる設定を必ず見つけられる。
-#   診断手順の目安:
-#     1. AZIMUTH_MIRROR_FIX=False のまま BNO_ORIENTATION を 1→2→3→4 と試す
-#     2. 全て試してもダメなら AZIMUTH_MIRROR_FIX=True にして 1→2→3→4 を再度試す
-AZIMUTH_MIRROR_FIX = True
 
 def set_bno_orientation(bno: BNO055, orientation: int):
     """
@@ -1610,12 +1563,8 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
     log(f"  スタック確定: {STUCK_COUNT_THRESHOLD} 回連続 ({STUCK_COUNT_THRESHOLD * LOOP_DT:.1f} s)")
     log_data_status("Phase4開始時点")
 
-    # ★変更: このフェーズだけモータの forward/backward (IN/OUT) を一時的に反転
-    #        (PHASE4_MOTOR_REVERSED の値に応じて反転有無をログ表示)
-    reversed_state = "反転" if PHASE4_MOTOR_REVERSED else "通常(反転なし)"
-    log(f"[Phase4] ★モータのIN/OUTを{reversed_state}に設定します "
-        f"(PHASE4_MOTOR_REVERSED={PHASE4_MOTOR_REVERSED})")
-    motor.set_reversed(PHASE4_MOTOR_REVERSED)
+    # ★削除: Phase4限定のモータ反転フラグ (PHASE4_MOTOR_REVERSED) は撤去。
+    #        モータは常に素直に forward=前進 / backward=後退として動作する。
 
     # ★追加: Phase4 (誘導走行・スタック回復) では、いかなる場合も
     #        モータを後退方向へ回転させてはならない。backward() が万一
@@ -1899,8 +1848,6 @@ def phase4_guided_run(bno: BNO055, sonar: SonarSensor,
 
     finally:
         motor.stop()
-        # ★追加: Phase4限定の反転を元に戻す (Phase5などに影響させないため)
-        motor.set_reversed(False)
         # ★追加: Phase4限定の後退禁止ロックを解除 (Phase5などに影響させないため)
         motor.set_forward_only(False)
         log("[Phase4] 安全ロック: 後退禁止モードを解除しました")

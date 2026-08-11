@@ -163,6 +163,103 @@ from BMP180 import BMP180
 from micropyGPS import MicropyGPS
 
 # ===========================================================================
+# グローバル共有変数 (★変更: 全体コードの最上部に配置)
+# ===========================================================================
+# ★変更: 以前は「設定値」セクションの後 (ファイル中盤) に置いていたが、
+#        コード全体を読む際にまず「どんな状態を共有しているか」が
+#        ひと目でわかるよう、import 文の直後・設定値セクションの前に
+#        移動した。ここに定義される変数は、各フェーズ関数・スレッド間で
+#        センサ値や走行状態を共有するために使われる。
+
+phase = 0               # 現在フェーズ番号
+
+# センサ最新値
+g_acc        = [0.0, 0.0, 0.0]
+g_mag        = [0.0, 0.0, 0.0]
+g_gyro       = [0.0, 0.0, 0.0]
+g_calib      = (0, 0, 0, 0)    # (sys, gyro, accel, mag)
+g_temp       = 0.0
+g_pressure   = 0.0
+g_altitude   = 0.0
+g_gps_lat    = 0.0
+g_gps_lng    = 0.0
+g_gps_speed  = 0.0
+g_gps_sats   = 0
+g_gps_valid  = False
+g_sonar_m    = None             # None = 測定失敗
+
+# ★追加: 地磁気ベクトルの平滑化 (EMA: 指数移動平均) 状態。
+#        実機ログ解析により、モータへ高デューティで通電している間、
+#        地磁気センサの読み取り値が100ms間隔で数十〜100度以上も
+#        ジャンプするほどのノイズ (モータ電流による磁気干渉と推定) が
+#        発生し、これが原因で機体方位が暴れて GPS 誘導が発散
+#        (目標から遠ざかる) することが確認された。calc_azimuth_with_front()
+#        内でこの EMA フィルタを適用し、瞬間的なノイズの影響を抑える。
+g_mag_ema = None   # [x, y, z] の平滑化済みベクトル。None = 未初期化 (最初のサンプルで初期化)
+MAG_EMA_ALPHA = 0.25   # [-] 0〜1。小さいほど平滑化が強い(応答は遅くなる)。
+                       #     新規サンプルの反映比率: new = alpha*sample + (1-alpha)*old
+
+# ログバッファ
+log_rows  = []
+log_lock  = threading.Lock()
+
+# フェーズ番号 → 日本語名。ログに現在何をしているフェーズかを
+# ひと目でわかるように併記するために使う。
+PHASE_NAMES = {
+    0: "初期化",
+    1: "落下検知",
+    2: "初期後退・停止・前進",
+    3: "キャリブレーション/GPS安定化",
+    4: "GPS誘導走行",
+    5: "超音波最終接近",
+}
+
+# センサ別のデータ取得状況トラッキング ──────────────────────────
+# 「直近の読み取りが成功したか」「最後に成功したのはいつか」をセンサごとに
+# 記録しておき、ログでひと目に状況がわかるようにする
+# (例: GPS だけ Fix していない、Sonar が長時間 NG、等にすぐ気づける)。
+SENSOR_NAMES = ("BNO055", "GPS", "Sonar")
+g_sensor_status = {
+    name: {"ok": False, "last_ok_time": None, "detail": "未取得"}
+    for name in SENSOR_NAMES
+}
+g_sensor_status_lock = threading.Lock()
+
+def mark_sensor_ok(name: str, detail: str = ""):
+    """センサ読み取り成功時に状況を更新する。"""
+    with g_sensor_status_lock:
+        g_sensor_status[name] = {"ok": True, "last_ok_time": time.time(), "detail": detail}
+
+def mark_sensor_fail(name: str, detail: str = ""):
+    """センサ読み取り失敗時に状況を更新する (直近成功時刻は保持し、経過時間を追えるようにする)。"""
+    with g_sensor_status_lock:
+        prev = g_sensor_status.get(name, {})
+        g_sensor_status[name] = {
+            "ok": False,
+            "last_ok_time": prev.get("last_ok_time"),
+            "detail": detail,
+        }
+
+def format_sensor_status() -> str:
+    """全センサの取得状況を 1 行にまとめた文字列を作る (ログ表示用)。"""
+    now = time.time()
+    parts = []
+    with g_sensor_status_lock:
+        snapshot = {k: dict(v) for k, v in g_sensor_status.items()}
+    for name in SENSOR_NAMES:
+        st = snapshot.get(name, {})
+        if st.get("ok"):
+            detail = st.get("detail", "")
+            parts.append(f"{name}=OK" + (f"({detail})" if detail else ""))
+        else:
+            last = st.get("last_ok_time")
+            if last is None:
+                parts.append(f"{name}=未取得")
+            else:
+                parts.append(f"{name}=NG(最終成功 {now - last:.0f}s前)")
+    return "  ".join(parts)
+
+# ===========================================================================
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #   設定値  ← ここを実地に合わせて変更
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -386,102 +483,6 @@ EARTH_RADIUS = 6371000.0   # [m]  Haversine計算用の地球平均半径
 
 # ログ
 LOG_DIR = _ROOT_DIR / "logs"
-
-# ===========================================================================
-# グローバル共有変数
-# ===========================================================================
-
-phase = 0               # 現在フェーズ番号
-
-# センサ最新値
-g_acc        = [0.0, 0.0, 0.0]
-g_mag        = [0.0, 0.0, 0.0]
-g_gyro       = [0.0, 0.0, 0.0]
-g_calib      = (0, 0, 0, 0)    # (sys, gyro, accel, mag)
-g_temp       = 0.0
-g_pressure   = 0.0
-g_altitude   = 0.0
-g_gps_lat    = 0.0
-g_gps_lng    = 0.0
-g_gps_speed  = 0.0
-g_gps_sats   = 0
-g_gps_valid  = False
-g_sonar_m    = None             # None = 測定失敗
-
-# ★削除: 前方オフセット関連のグローバル変数 (g_front_offset_deg /
-#        g_front_candidate) は、前方補正を BNO055 の Axis Remap
-#        (BNO_ORIENTATION) に一本化したことに伴い不要になったため削除。
-
-# ★追加: 地磁気ベクトルの平滑化 (EMA: 指数移動平均) 状態。
-#        実機ログ解析により、モータへ高デューティで通電している間、
-#        地磁気センサの読み取り値が100ms間隔で数十〜100度以上も
-#        ジャンプするほどのノイズ (モータ電流による磁気干渉と推定) が
-#        発生し、これが原因で機体方位が暴れて GPS 誘導が発散
-#        (目標から遠ざかる) することが確認された。calc_azimuth_with_front()
-#        内でこの EMA フィルタを適用し、瞬間的なノイズの影響を抑える。
-g_mag_ema = None   # [x, y, z] の平滑化済みベクトル。None = 未初期化 (最初のサンプルで初期化)
-MAG_EMA_ALPHA = 0.25   # [-] 0〜1。小さいほど平滑化が強い(応答は遅くなる)。
-                       #     新規サンプルの反映比率: new = alpha*sample + (1-alpha)*old
-
-# ログバッファ
-log_rows  = []
-log_lock  = threading.Lock()
-
-# ★追加: フェーズ番号 → 日本語名。ログに現在何をしているフェーズかを
-#        ひと目でわかるように併記するために使う。
-PHASE_NAMES = {
-    0: "初期化",
-    1: "落下検知",
-    2: "初期後退・停止・前進",
-    3: "キャリブレーション/GPS安定化",
-    4: "GPS誘導走行",
-    5: "超音波最終接近",
-}
-
-# ★追加: センサ別のデータ取得状況トラッキング ──────────────────────────
-# 「直近の読み取りが成功したか」「最後に成功したのはいつか」をセンサごとに
-# 記録しておき、ログでひと目に状況がわかるようにする
-# (例: GPS だけ Fix していない、Sonar が長時間 NG、等にすぐ気づける)。
-SENSOR_NAMES = ("BNO055", "GPS", "Sonar")
-g_sensor_status = {
-    name: {"ok": False, "last_ok_time": None, "detail": "未取得"}
-    for name in SENSOR_NAMES
-}
-g_sensor_status_lock = threading.Lock()
-
-def mark_sensor_ok(name: str, detail: str = ""):
-    """センサ読み取り成功時に状況を更新する。"""
-    with g_sensor_status_lock:
-        g_sensor_status[name] = {"ok": True, "last_ok_time": time.time(), "detail": detail}
-
-def mark_sensor_fail(name: str, detail: str = ""):
-    """センサ読み取り失敗時に状況を更新する (直近成功時刻は保持し、経過時間を追えるようにする)。"""
-    with g_sensor_status_lock:
-        prev = g_sensor_status.get(name, {})
-        g_sensor_status[name] = {
-            "ok": False,
-            "last_ok_time": prev.get("last_ok_time"),
-            "detail": detail,
-        }
-
-def format_sensor_status() -> str:
-    """全センサの取得状況を 1 行にまとめた文字列を作る (ログ表示用)。"""
-    now = time.time()
-    parts = []
-    with g_sensor_status_lock:
-        snapshot = {k: dict(v) for k, v in g_sensor_status.items()}
-    for name in SENSOR_NAMES:
-        st = snapshot.get(name, {})
-        if st.get("ok"):
-            detail = st.get("detail", "")
-            parts.append(f"{name}=OK" + (f"({detail})" if detail else ""))
-        else:
-            last = st.get("last_ok_time")
-            if last is None:
-                parts.append(f"{name}=未取得")
-            else:
-                parts.append(f"{name}=NG(最終成功 {now - last:.0f}s前)")
-    return "  ".join(parts)
 
 # ===========================================================================
 # ロガー
@@ -916,13 +917,32 @@ def calc_target_bearing(lat, lng) -> float:
 
 def calc_azimuth(mag: list) -> float:
     """
-    生の地磁気ベクトル (X=右, Y=前) から正確な方位角 [度, 0〜360, 時計回り] を計算
+    生の地磁気ベクトルから磁北基準の方位角 [度, 北=0, 東=90, 南=180, 西=270,
+    時計回り] を計算する。
+
+    ★重要: `90.0 - atan2(mag[1], mag[0])` の時点で「北=0°,東=90°,
+    南=180°,西=270°」の時計回り方位になるという理論上の想定に基づき、
+    以前はここでさらに `az *= -1` を行っていた行を「鏡写しバグ」として
+    削除したが、実機で全ての BNO_ORIENTATION (1〜4) を試しても常に
+    反対方向へ進むという症状が報告された。
+
+    BNO_ORIENTATION による Axis Remap は Z軸回りの「回転」しか補正でき
+    ないため、もし実際に地磁気センサのX/Y軸の解釈が理論上の想定と
+    鏡写し (東西反転) の関係にある場合、回転をどれだけ試しても絶対に
+    補正できない。「どの向きを試しても反対方向」という症状は、まさに
+    回転(BNO_ORIENTATION)では補正不可能な鏡写し型のズレが残っている
+    ことを強く示唆する。
+
+    そこで、この鏡写し補正を AZIMUTH_MIRROR_FIX という独立したフラグに
+    切り出した。BNO_ORIENTATION (回転: 4通り) × AZIMUTH_MIRROR_FIX
+    (鏡写し: 2通り) の組み合わせで合計8通りとなり、実際に有り得る
+    センサ取り付け・軸解釈の全パターンを尽くせるようにしている。
     """
-    # atan2(-X, Y) により、北=0°, 東=90°, 南=180°, 西=270° が正しく得られます
-    az = math.degrees(math.atan2(-mag[0], mag[1]))
+    az = 90.0 - math.degrees(math.atan2(mag[1], mag[0]))
+    if AZIMUTH_MIRROR_FIX:
+        az = -az
     az += MAG_DECLINATION
     return az % 360.0
-
 
 def calc_direction_diff(azimuth: float, bearing: float) -> float:
     diff = (azimuth - bearing) % 360.0
@@ -964,6 +984,19 @@ def calc_direction_diff(azimuth: float, bearing: float) -> float:
 # ★実機で 1→2→3→4 の順に試し、Phase4 で目標へ正しく向かって前進する
 #   設定値をここに固定すること。
 BNO_ORIENTATION = 1
+
+# --- 地磁気の鏡写し(東西反転)補正 (★追加) -----------------------------------
+# BNO_ORIENTATION (Z軸回りの回転) をどれに設定しても機体が反対方向へ
+# 進んでしまう場合、それは回転では補正できない「鏡写し(東西反転)型」の
+# ズレが残っている可能性が高い。True にすると calc_azimuth() 内で
+# 方位角の符号を反転させる (東西を鏡写しにする)。
+# BNO_ORIENTATION (4通り) × AZIMUTH_MIRROR_FIX (2通り) = 8通りの組み合わせを
+# 順に試すことで、実機のセンサ取り付け・軸配置がどのパターンであっても
+# 正しい方位が得られる設定を必ず見つけられる。
+#   診断手順の目安:
+#     1. AZIMUTH_MIRROR_FIX=False のまま BNO_ORIENTATION を 1→2→3→4 と試す
+#     2. 全て試してもダメなら AZIMUTH_MIRROR_FIX=True にして 1→2→3→4 を再度試す
+AZIMUTH_MIRROR_FIX = True
 
 def set_bno_orientation(bno: BNO055, orientation: int):
     """

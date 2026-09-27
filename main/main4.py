@@ -716,10 +716,10 @@ class SonarSensor:
 
 class MotorController:
     def __init__(self):
-        self._pwm_a  = PWMOutputDevice(PIN_PWMA)
-        self._pwm_b  = PWMOutputDevice(PIN_PWMB)
-        self._mot_a  = Motor(forward=PIN_AIN1, backward=PIN_AIN2)   # 右
-        self._mot_b  = Motor(forward=PIN_BIN1, backward=PIN_BIN2)   # 左
+        self._pwm_a  = PWMOutputDevice(PIN_PWMB)
+        self._pwm_b  = PWMOutputDevice(PIN_PWMA)
+        self._mot_a  = Motor(forward=PIN_BIN1, backward=PIN_BIN2)   # 右
+        self._mot_b  = Motor(forward=PIN_AIN1, backward=PIN_AIN2)   # 左
         self._stby   = OutputDevice(PIN_STBY)
         # ★削除: モータの forward/backward を丸ごと反転させる _reversed
         #        フラグは撤去した。モータは常に素直に forward=前進 /
